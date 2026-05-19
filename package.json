@@ -1,0 +1,22 @@
+{
+  "name": "telegram-crypto-alert-bot",
+  "version": "1.0.0",
+  "description": "Crypto alert scanner using public exchange candles, safe-zone SL, smart liquidity TP, and Telegram notifications.",
+  "main": "src/index.js",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "cross-env RUN_ONCE=true node src/index.js",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/indicators.js && node --check src/strategy.js && node --check src/telegram.js && node --check src/state.js && node --check src/utils.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "ccxt": "^4.4.95",
+    "dotenv": "^16.4.7",
+    "cross-env": "^7.0.3"
+  }
+}
