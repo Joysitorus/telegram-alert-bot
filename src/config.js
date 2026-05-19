@@ -1,12 +1,22 @@
 import "dotenv/config";
-import { parseCsv, toBoolean, toNumber } from "./utils.js";
+import { parseCsv, parseJson, toBoolean, toNumber } from "./utils.js";
+
+const builtInStrategyProfiles = {
+  scalping: { minConfirm: 5, minRR: 2.0, maxSafeSlPercent: 3.0, cooldownSeconds: 900 },
+  swing: { minConfirm: 5, minRR: 3.0, maxSafeSlPercent: 6.0, cooldownSeconds: 7200 },
+  meme: { minConfirm: 6, minRR: 4.0, maxSafeSlPercent: 8.0, cooldownSeconds: 1800 },
+  major: { minConfirm: 5, minRR: 2.5, maxSafeSlPercent: 4.0, cooldownSeconds: 3600 }
+};
 
 export const config = {
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || "",
     chatId: process.env.TELEGRAM_CHAT_ID || "",
+    adminIds: parseCsv(process.env.TELEGRAM_ADMIN_IDS || "", []),
     sendStartupMessage: toBoolean(process.env.SEND_STARTUP_MESSAGE, true),
-    alertErrors: toBoolean(process.env.ALERT_ERRORS, false)
+    alertErrors: toBoolean(process.env.ALERT_ERRORS, false),
+    commandsEnabled: toBoolean(process.env.TELEGRAM_COMMANDS_ENABLED, true),
+    commandPollTimeoutSeconds: toNumber(process.env.TELEGRAM_COMMAND_POLL_TIMEOUT_SECONDS, 25, { min: 1, max: 50 })
   },
 
   exchange: {
@@ -21,8 +31,32 @@ export const config = {
 
   runtime: {
     stateFile: process.env.STATE_FILE || "./state.json",
+    databaseUrl: process.env.DATABASE_URL || "",
     priceDecimals: toNumber(process.env.PRICE_DECIMALS, 12, { min: 2, max: 18 }),
-    logLevel: process.env.LOG_LEVEL || "info"
+    logLevel: process.env.LOG_LEVEL || "info",
+    retryAttempts: toNumber(process.env.RETRY_ATTEMPTS, 3, { min: 1, max: 10 }),
+    retryDelayMs: toNumber(process.env.RETRY_DELAY_MS, 1000, { min: 100, max: 60000 }),
+    errorAlertCooldownSeconds: toNumber(process.env.ERROR_ALERT_COOLDOWN_SECONDS, 900, { min: 30, max: 86400 }),
+    healthcheckEnabled: toBoolean(process.env.HEALTHCHECK_ENABLED, false),
+    healthcheckPort: toNumber(process.env.PORT || process.env.HEALTHCHECK_PORT, 3000, { min: 1, max: 65535 }),
+    heartbeatEnabled: toBoolean(process.env.HEARTBEAT_ENABLED, false),
+    heartbeatIntervalHours: toNumber(process.env.HEARTBEAT_INTERVAL_HOURS, 24, { min: 1, max: 168 })
+  },
+
+  paper: {
+    enabled: toBoolean(process.env.PAPER_TRADING_ENABLED, false),
+    feePercent: toNumber(process.env.PAPER_TRADING_FEE_PERCENT, 0, { min: 0, max: 5 }),
+    slippagePercent: toNumber(process.env.PAPER_TRADING_SLIPPAGE_PERCENT, 0, { min: 0, max: 5 })
+  },
+
+  performance: {
+    weeklyReportEnabled: toBoolean(process.env.WEEKLY_PERFORMANCE_REPORT_ENABLED, true),
+    monthlyReportEnabled: toBoolean(process.env.MONTHLY_PERFORMANCE_REPORT_ENABLED, true),
+    reportTimezone: process.env.PERFORMANCE_REPORT_TIMEZONE || "Asia/Jakarta",
+    reportDay: toNumber(process.env.PERFORMANCE_REPORT_DAY, 1, { min: 0, max: 6 }),
+    reportHour: toNumber(process.env.PERFORMANCE_REPORT_HOUR, 8, { min: 0, max: 23 }),
+    monthlyReportDay: toNumber(process.env.MONTHLY_PERFORMANCE_REPORT_DAY, 1, { min: 1, max: 28 }),
+    monthlyReportHour: toNumber(process.env.MONTHLY_PERFORMANCE_REPORT_HOUR, 8, { min: 0, max: 23 })
   },
 
   strategy: {
@@ -63,9 +97,29 @@ export const config = {
     minOrderBlockScore: toNumber(process.env.MIN_ORDER_BLOCK_SCORE, 60, { min: 0, max: 200 }),
 
     tp1Portion: toNumber(process.env.TP1_PORTION, 0.33, { min: 0.05, max: 0.95 }),
-    tp2Portion: toNumber(process.env.TP2_PORTION, 0.66, { min: 0.05, max: 0.99 })
+    tp2Portion: toNumber(process.env.TP2_PORTION, 0.66, { min: 0.05, max: 0.99 }),
+    profile: process.env.STRATEGY_PROFILE || "",
+    customProfiles: parseJson(process.env.STRATEGY_PROFILES_JSON, {}),
+    symbolOverrides: parseJson(process.env.SYMBOL_STRATEGY_OVERRIDES_JSON, {}),
+    higherTimeframe: process.env.HIGHER_TIMEFRAME || "",
+    requireHigherTimeframeTrend: toBoolean(process.env.REQUIRE_HIGHER_TIMEFRAME_TREND, false),
+    cooldownSeconds: toNumber(process.env.SIGNAL_COOLDOWN_SECONDS, 0, { min: 0, max: 86400 })
   }
 };
+
+export function getStrategyConfigForSymbol(symbol) {
+  const profileOverrides = {
+    ...builtInStrategyProfiles,
+    ...config.strategy.customProfiles
+  }[config.strategy.profile] || {};
+  const symbolOverrides = config.strategy.symbolOverrides[symbol] || {};
+
+  return {
+    ...config.strategy,
+    ...profileOverrides,
+    ...symbolOverrides
+  };
+}
 
 export function validateConfig() {
   const errors = [];
@@ -74,6 +128,10 @@ export function validateConfig() {
   if (!config.telegram.chatId) errors.push("TELEGRAM_CHAT_ID belum diisi.");
   if (!config.exchange.id) errors.push("EXCHANGE belum diisi.");
   if (!config.exchange.symbols.length) errors.push("SYMBOLS belum diisi.");
+
+  if (!/^\d+[mhdwM]$/.test(config.exchange.timeframe)) {
+    errors.push("TIMEFRAME tidak valid. Contoh valid: 1m, 15m, 1h, 4h, 1d.");
+  }
 
   if (config.strategy.emaFast >= config.strategy.emaMid) {
     errors.push("EMA_FAST sebaiknya lebih kecil dari EMA_MID.");
@@ -85,6 +143,10 @@ export function validateConfig() {
 
   if (config.strategy.tp1Portion >= config.strategy.tp2Portion) {
     errors.push("TP1_PORTION harus lebih kecil dari TP2_PORTION.");
+  }
+
+  if (config.strategy.higherTimeframe && !/^\d+[mhdwM]$/.test(config.strategy.higherTimeframe)) {
+    errors.push("HIGHER_TIMEFRAME tidak valid. Contoh valid: 1h, 4h, 1d.");
   }
 
   if (errors.length > 0) {

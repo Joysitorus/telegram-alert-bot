@@ -44,9 +44,10 @@ Bot menggunakan data candle OHLCV dari exchange. Di CCXT, method `fetchOHLCV` di
 - Tidak perlu webhook TradingView.
 - Tidak perlu API key untuk market data publik.
 - Kirim alert langsung ke Telegram Bot.
+- Support command Telegram untuk cek status, performance, pause, resume, dan scan manual.
 - Support multi-symbol.
 - Support Railway Worker.
-- Menghindari alert duplikat dengan file `state.json`.
+- Menghindari alert duplikat dengan `state.json` atau PostgreSQL via `DATABASE_URL`.
 - SL dinamis di luar order block/swing dengan buffer ATR.
 - TP3 menggunakan smart liquidity target.
 - TP1 dan TP2 otomatis mengikuti jarak menuju TP3.
@@ -290,6 +291,13 @@ SYMBOLS=PEPE/USDT,BTC/USDT
 TIMEFRAME=15m
 CANDLE_LIMIT=1000
 CHECK_INTERVAL_SECONDS=60
+WEEKLY_PERFORMANCE_REPORT_ENABLED=true
+MONTHLY_PERFORMANCE_REPORT_ENABLED=true
+PERFORMANCE_REPORT_TIMEZONE=Asia/Jakarta
+PERFORMANCE_REPORT_DAY=1
+PERFORMANCE_REPORT_HOUR=8
+MONTHLY_PERFORMANCE_REPORT_DAY=1
+MONTHLY_PERFORMANCE_REPORT_HOUR=8
 ```
 
 ---
@@ -369,11 +377,147 @@ Tujuannya:
 - tidak mengirim SELL lagi jika sinyal terakhir sudah SELL
 - sinyal baru akan muncul jika arah berubah
 
-Catatan: jika Railway redeploy dan filesystem reset, state bisa hilang. Untuk penggunaan serius, simpan state di database seperti Redis/Postgres.
+Catatan: jika Railway redeploy dan filesystem reset, state bisa hilang. Untuk penggunaan serius, isi `DATABASE_URL` PostgreSQL atau gunakan Railway Volume agar state durable.
+
+### Storage production dengan PostgreSQL
+
+Secara default bot memakai file `STATE_FILE`.
+
+Jika `DATABASE_URL` diisi, bot akan memakai PostgreSQL dan otomatis membuat tabel `bot_state`:
+
+```env
+DATABASE_URL=postgresql://user:password@host:5432/database
+```
+
+Saat pertama kali memakai PostgreSQL, bot akan mencoba membaca state lama dari `STATE_FILE` lalu menyimpannya ke database.
 
 ---
 
-## 15. Pengaturan yang Paling Penting
+## 15. Command Telegram
+
+Bot dapat menerima command lewat long polling Telegram jika `TELEGRAM_COMMANDS_ENABLED=true`.
+
+Command yang tersedia:
+
+- `/start` - menampilkan bantuan awal.
+- `/help` - menampilkan daftar command.
+- `/status` - menampilkan status scanner, scan terakhir, dan error terakhir.
+- `/performance` - menampilkan performa all-time.
+- `/paper` - menampilkan ringkasan paper trading.
+- `/open` - menampilkan trade terbuka.
+- `/symbols` - menampilkan daftar symbol yang dipantau.
+- `/settings` - menampilkan setting utama.
+- `/pause` - pause scanner tanpa mematikan process.
+- `/resume` - melanjutkan scanner.
+- `/scanonce` - menjadwalkan scan manual sekali.
+
+Security command:
+
+```env
+TELEGRAM_ADMIN_IDS=123456789,987654321
+```
+
+Jika `TELEGRAM_ADMIN_IDS` kosong, hanya `TELEGRAM_CHAT_ID` yang diizinkan memakai command.
+
+---
+
+## 16. Reliability Runtime
+
+Request ke exchange dan Telegram memakai retry sederhana.
+
+```env
+RETRY_ATTEMPTS=3
+RETRY_DELAY_MS=1000
+ERROR_ALERT_COOLDOWN_SECONDS=900
+```
+
+`ERROR_ALERT_COOLDOWN_SECONDS` mencegah Telegram spam jika error yang sama terjadi berulang.
+
+Observability optional:
+
+```env
+LOG_LEVEL=info
+HEALTHCHECK_ENABLED=false
+HEALTHCHECK_PORT=3000
+HEARTBEAT_ENABLED=false
+HEARTBEAT_INTERVAL_HOURS=24
+```
+
+Jika `HEALTHCHECK_ENABLED=true`, bot membuka endpoint `GET /health` berisi status scanner, last successful scan, dan error terakhir. Jika `HEARTBEAT_ENABLED=true`, bot mengirim heartbeat Telegram berkala.
+
+---
+
+## 17. Tracking Winrate Mingguan dan Bulanan
+
+Bot menyimpan setiap sinyal Telegram sebagai trade terbuka di `state.json` atau PostgreSQL.
+
+Lifecycle trade dihitung seperti ini:
+
+- Status awal `OPEN`.
+- Saat harga menyentuh target, status berubah menjadi `TP1_HIT`, `TP2_HIT`, atau `TP3_HIT` dan bot mengirim update Telegram.
+- Saat harga menyentuh SL, status berubah menjadi `SL_HIT` dan trade ditutup.
+- Saat TP3 tersentuh, trade ditutup sebagai target final.
+- Jika dalam candle yang sama TP dan SL sama-sama tersentuh, bot menghitung SL secara konservatif karena data OHLC tidak menunjukkan urutan intrabar.
+- Report menampilkan winrate, TP3 hit, average R, average PnL, dan TP hit rate.
+
+Laporan winrate mingguan dikirim ke Telegram setiap Senin jam 08:00 WIB secara default. Laporan bulanan dikirim setiap tanggal 1 jam 08:00 WIB.
+
+```env
+WEEKLY_PERFORMANCE_REPORT_ENABLED=true
+MONTHLY_PERFORMANCE_REPORT_ENABLED=true
+PERFORMANCE_REPORT_TIMEZONE=Asia/Jakarta
+PERFORMANCE_REPORT_DAY=1
+PERFORMANCE_REPORT_HOUR=8
+MONTHLY_PERFORMANCE_REPORT_DAY=1
+MONTHLY_PERFORMANCE_REPORT_HOUR=8
+```
+
+`PERFORMANCE_REPORT_DAY` memakai format angka: `0` Minggu, `1` Senin, `2` Selasa, sampai `6` Sabtu.
+Laporan mingguan memakai 7 hari terakhir, sedangkan laporan bulanan memakai 30 hari terakhir dari waktu laporan dikirim.
+
+---
+
+## 18. Paper Trading Mode
+
+Paper trading menyimpan salinan sinyal sebagai paper trade tanpa eksekusi order real. Outcome dihitung dari candle live berikutnya memakai lifecycle TP1/TP2/TP3/SL yang sama.
+
+```env
+PAPER_TRADING_ENABLED=false
+PAPER_TRADING_FEE_PERCENT=0
+PAPER_TRADING_SLIPPAGE_PERCENT=0
+```
+
+Gunakan `/paper` untuk melihat ringkasan paper trading. Jika `PAPER_TRADING_ENABLED=true`, bot juga mengirim weekly paper report mengikuti jadwal `PERFORMANCE_REPORT_DAY` dan `PERFORMANCE_REPORT_HOUR`.
+
+---
+
+## 19. Strategy Profile, Override, HTF, dan Cooldown
+
+Bot mendukung profile bawaan `scalping`, `swing`, `meme`, dan `major`.
+
+```env
+STRATEGY_PROFILE=swing
+SIGNAL_COOLDOWN_SECONDS=3600
+```
+
+Override per symbol bisa memakai JSON dengan nama config camelCase sesuai internal config:
+
+```env
+SYMBOL_STRATEGY_OVERRIDES_JSON={"BTC/USDT:USDT":{"minConfirm":6,"minRR":2.5}}
+```
+
+Filter trend higher timeframe optional:
+
+```env
+HIGHER_TIMEFRAME=1h
+REQUIRE_HIGHER_TIMEFRAME_TREND=true
+```
+
+Jika aktif, BUY hanya lolos saat higher timeframe bullish, dan SELL hanya lolos saat higher timeframe bearish.
+
+---
+
+## 20. Pengaturan yang Paling Penting
 
 ### `SYMBOLS`
 
@@ -455,9 +599,9 @@ MIN_CONFIRM=6
 
 ---
 
-## 16. Rekomendasi Setting PEPE
+## 21. Rekomendasi Setting Koin
 
-Untuk PEPE 15m:
+Untuk pair crypto secara general di timeframe 15m:
 
 ```env
 TIMEFRAME=15m
@@ -496,7 +640,7 @@ LIQUIDITY_TOUCH_LOOKBACK=300
 
 ---
 
-## 17. Contoh Output Telegram
+## 22. Contoh Output Telegram
 
 ```text
 🔴 SELL SIGNAL
@@ -528,7 +672,7 @@ Order Block Age: 8 candles
 
 ---
 
-## 18. Troubleshooting
+## 23. Troubleshooting
 
 ### Bot tidak mengirim Telegram
 
@@ -591,7 +735,7 @@ Cek log Railway. Pastikan semua variable wajib sudah diisi.
 
 ---
 
-## 19. Catatan Data dan Akurasi
+## 24. Catatan Data dan Akurasi
 
 Hasil indikator bisa sedikit berbeda dari TradingView karena:
 
@@ -605,7 +749,7 @@ Bot ini tidak menjamin profit. Gunakan sebagai alat bantu monitoring.
 
 ---
 
-## 20. License
+## 25. License
 
 Project ini memakai MIT License. Kamu boleh memakai, memodifikasi, dan mengembangkan project ini, termasuk untuk penggunaan komersial, selama tetap menyertakan notice license.
 
@@ -613,13 +757,13 @@ Lihat file `LICENSE`.
 
 ---
 
-## 21. Disclaimer
+## 26. Disclaimer
 
 Bot ini bukan nasihat finansial. Semua keputusan trading tetap tanggung jawab pengguna. Crypto sangat volatil dan bisa menyebabkan kerugian besar.
 
 ---
 
-## 22. Referensi Teknis
+## 27. Referensi Teknis
 
 - CCXT Documentation: https://docs.ccxt.com/
 - CCXT GitHub README: https://github.com/ccxt/ccxt

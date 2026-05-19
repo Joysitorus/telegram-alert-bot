@@ -51,6 +51,23 @@ ${directionEmoji} <b>${escapeHtml(signal.direction)} SIGNAL</b>
 `.trim();
 }
 
+export function buildTradeEventMessage(event, priceDecimals = 12) {
+  const trade = event.trade;
+  const title = event.paper ? "Paper Trade Update" : "Trade Update";
+  return `
+<b>${escapeHtml(title)}</b>
+
+<b>Status:</b> ${escapeHtml(event.type)}
+<b>Pair:</b> ${escapeHtml(`${trade.exchange}:${trade.symbol}`)}
+<b>Direction:</b> ${escapeHtml(trade.direction)}
+<b>Timeframe:</b> ${escapeHtml(trade.timeframe)}
+<b>Exit:</b> <code>${escapeHtml(formatPrice(trade.exit, priceDecimals))}</code>
+<b>R:</b> ${escapeHtml(formatNumber(trade.realizedR, 2))}R
+<b>PnL:</b> ${escapeHtml(formatNumber(trade.pnlPercent, 2))}%
+<b>Candle:</b> ${escapeHtml(formatDateTime(event.candleTime))}
+`.trim();
+}
+
 export function buildStartupMessage({ exchangeId, symbols, timeframe, checkIntervalSeconds }) {
   return `
 ✅ <b>Crypto Alert Bot Started</b>
@@ -59,6 +76,62 @@ export function buildStartupMessage({ exchangeId, symbols, timeframe, checkInter
 <b>Symbols:</b> ${escapeHtml(symbols.join(", "))}
 <b>Timeframe:</b> ${escapeHtml(timeframe)}
 <b>Interval:</b> ${escapeHtml(String(checkIntervalSeconds))} seconds
+`.trim();
+}
+
+function buildPerformanceMessage(report, title) {
+  return `
+📊 <b>${escapeHtml(title)}</b>
+
+<b>Period:</b> ${escapeHtml(formatDateTime(report.from))} - ${escapeHtml(formatDateTime(report.to))}
+<b>Target Win:</b> Minimal TP2
+
+<b>Closed Trades:</b> ${escapeHtml(String(report.closed))}
+<b>Wins TP2:</b> ${escapeHtml(String(report.wins))}
+<b>TP3 Hits:</b> ${escapeHtml(String(report.tp3Hits))}
+<b>Losses SL:</b> ${escapeHtml(String(report.losses))}
+<b>Winrate:</b> ${escapeHtml(formatNumber(report.winrate, 2))}%
+<b>Avg PnL:</b> ${escapeHtml(formatNumber(report.avgPnlPercent, 2))}%
+<b>Avg R:</b> ${escapeHtml(formatNumber(report.avgR, 2))}R
+<b>TP Hit Rate:</b> ${escapeHtml(formatNumber(report.tpHitRate, 2))}%
+<b>Open Trades:</b> ${escapeHtml(String(report.open))}
+
+<b>All-Time Closed:</b> ${escapeHtml(String(report.allClosed))}
+<b>All-Time Winrate:</b> ${escapeHtml(formatNumber(report.allWinrate, 2))}%
+`.trim();
+}
+
+export function buildHeartbeatMessage({ runtime, openTrades }) {
+  return `
+<b>Bot Heartbeat</b>
+
+<b>Status:</b> ${runtime.paused ? "PAUSED" : "RUNNING"}
+<b>Last Success:</b> ${escapeHtml(formatDateTime(runtime.lastScanSuccessAt))}
+<b>Open Trades:</b> ${escapeHtml(String(openTrades))}
+<b>Last Error:</b> ${escapeHtml(runtime.lastScanError || "-")}
+`.trim();
+}
+
+export function buildWeeklyPerformanceMessage(report) {
+  return buildPerformanceMessage(report, "Weekly Winrate Report");
+}
+
+export function buildMonthlyPerformanceMessage(report) {
+  return buildPerformanceMessage(report, "Monthly Winrate Report");
+}
+
+export function buildPaperPerformanceMessage(report) {
+  return `
+<b>Weekly Paper Trading Report</b>
+
+<b>Period:</b> ${escapeHtml(formatDateTime(report.from))} - ${escapeHtml(formatDateTime(report.to))}
+<b>Total Paper Trades:</b> ${escapeHtml(String(report.total))}
+<b>Closed:</b> ${escapeHtml(String(report.closed))}
+<b>Open:</b> ${escapeHtml(String(report.open))}
+<b>Wins:</b> ${escapeHtml(String(report.wins))}
+<b>Losses:</b> ${escapeHtml(String(report.losses))}
+<b>Winrate:</b> ${escapeHtml(formatNumber(report.winrate, 2))}%
+<b>Avg R:</b> ${escapeHtml(formatNumber(report.avgR, 2))}R
 `.trim();
 }
 

@@ -290,6 +290,7 @@ function getSellLiquidityTarget({ entry, sl, candles, pivots, atrValue, emaLongV
 
 export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategyConfig, pairState = {} }) {
   const cfg = strategyConfig;
+  const inCooldown = cfg.cooldownSeconds > 0 && pairState.lastSignalAt && Date.now() - pairState.lastSignalAt < cfg.cooldownSeconds * 1000;
 
   const requiredCandles = Math.max(
     cfg.emaLong + 60,
@@ -463,7 +464,7 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
 
   let signal = null;
 
-  if (buySignal && pairState.lastDirection !== 1 && pairState.lastSignalCandleTime !== current.timestamp) {
+  if (!inCooldown && buySignal && pairState.lastDirection !== 1 && pairState.lastSignalCandleTime !== current.timestamp) {
     signal = {
       direction: "BUY",
       directionValue: 1,
@@ -494,7 +495,7 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
     };
   }
 
-  if (sellSignal && pairState.lastDirection !== -1 && pairState.lastSignalCandleTime !== current.timestamp) {
+  if (!inCooldown && sellSignal && pairState.lastDirection !== -1 && pairState.lastSignalCandleTime !== current.timestamp) {
     signal = {
       direction: "SELL",
       directionValue: -1,
@@ -552,7 +553,8 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       sellSlSource: sellSafeSl.source,
       buyLiquiditySource: buyLiquidity.source,
       sellLiquiditySource: sellLiquidity.source,
-      trend: current.close > emaLong[i] ? "BULLISH" : current.close < emaLong[i] ? "BEARISH" : "NEUTRAL"
+      trend: current.close > emaLong[i] ? "BULLISH" : current.close < emaLong[i] ? "BEARISH" : "NEUTRAL",
+      inCooldown
     }
   };
 }

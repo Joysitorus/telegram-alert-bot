@@ -46,6 +46,17 @@ export function parseCsv(value, fallback = []) {
     .filter(Boolean);
 }
 
+export function parseJson(value, fallback = {}) {
+  if (!value) return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    console.warn(`Gagal parse JSON env: ${error.message}`);
+    return fallback;
+  }
+}
+
 export function formatPrice(value, decimals = 12) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
 
