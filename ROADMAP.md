@@ -1,308 +1,417 @@
 # Roadmap Telegram Crypto Alert Bot
 
-Dokumen ini berisi roadmap fitur dan rencana implementasi bertahap untuk meningkatkan project menjadi bot alert crypto yang lebih reliable, interaktif, dan mudah dievaluasi.
+Roadmap ini adalah roadmap terbaru setelah baseline alert bot, paper trading, risk engine, signal-quality filter, replay, dashboard, Telegram control panel, metrics, dan deployment hardening selesai secara fungsional.
 
-## 1. Kondisi Saat Ini
+Tujuan roadmap baru: menaikkan kualitas evaluasi strategi, akurasi simulasi futures, ketahanan production, dan kesiapan produk jika nanti ingin bergerak dari alert-only ke decision-support yang lebih serius. Bot tetap **alert-only dan paper-trading** sampai ada desain keamanan terpisah untuk real order execution.
 
-Project saat ini sudah memiliki fondasi utama:
+## 1. Status Baseline Saat Ini
 
-- Scanner market menggunakan CCXT dan candle OHLCV publik.
-- Support multi-symbol.
-- Strategi teknikal berbasis EMA, RSI, MACD, ADX, volume, breakout, order block, dan smart liquidity target.
-- Safe-zone stop loss berbasis order block/swing dan ATR buffer.
-- TP1, TP2, TP3 otomatis dari jarak ke target liquidity.
-- Anti-spam alert menggunakan `state.json`.
-- Tracking open/closed trade sederhana dengan outcome TP2 atau SL.
-- Laporan winrate mingguan dan bulanan ke Telegram.
-- Deployment cocok untuk Railway Worker.
+Sudah tersedia:
 
-Gap utama yang perlu ditutup:
+- Scanner multi-symbol berbasis CCXT OHLCV.
+- Strategi teknikal EMA, RSI, MACD, ADX, volume, breakout, order block, smart liquidity, market regime, higher timeframe, funding, open interest, dan long/short ratio.
+- Signal-quality filter: entry mode, breakout ATR, extension ATR, candle body/wick/volume, fallback liquidity reject.
+- Trade lifecycle: TP1/TP2/TP3/SL/EXPIRED, partial exit, fee/slippage, break-even after TP1, trailing after TP2.
+- Paper trading futures-style: initial balance, notional, leverage, margin, liquidation, daily loss limit, drawdown kill switch, risk mode, max notional/margin.
+- State schema version, migration backup, file/PostgreSQL storage, file lock, PostgreSQL advisory lock.
+- Telegram commands, role admin/operator/viewer, inline keyboard, risk/equity/drawdown/rejected/why/backup commands.
+- Dashboard HTML, equity curve, rejected decisions table, `/health`, `/metrics`.
+- Replay baseline via `npm run replay`.
+- Tests via `npm test`.
+- Railway deployment config.
 
-- State masih file-based dan rawan hilang saat redeploy tanpa volume/database.
-- Bot belum menerima command Telegram seperti `/status`, `/performance`, `/pause`, dan `/resume`.
-- Belum ada tracking lifecycle TP1/TP2/TP3/SL secara detail.
-- Belum ada backtesting historis untuk validasi strategi.
-- Belum ada paper trading forward-test.
-- Retry, backoff, throttling error, dan observability masih minimal.
-- Strategi masih monolitik dan belum mendukung profile/per-symbol override.
+Baseline verifikasi:
 
-## 2. Tujuan Pengembangan
+- `npm run check` wajib lolos.
+- `npm test` wajib lolos.
+- Default behavior tetap aman jika env baru tidak diisi.
 
-Tujuan utama roadmap ini:
+## 2. Prinsip Roadmap Baru
 
-- Membuat bot lebih stabil untuk jalan 24/7.
-- Mengurangi risiko kehilangan state dan spam alert.
-- Membuat bot bisa dikontrol dari Telegram.
-- Membuat setiap sinyal bisa dievaluasi sampai outcome final.
-- Menyediakan alat backtesting dan paper trading sebelum strategi dipakai serius.
-- Memudahkan tuning parameter per symbol, timeframe, dan karakter market.
-- Menyiapkan dasar untuk dashboard atau Telegram Mini App di masa depan.
+- Data internal menjadi sumber keputusan tuning, bukan impresi dari alert Telegram.
+- Strategi tidak boleh dianggap bagus sebelum lolos replay, paper forward-test, dan review drawdown.
+- Leverage tinggi hanya boleh dipakai jika liquidation distance valid terhadap SL.
+- Setiap fitur baru harus menyimpan reason code agar bisa diaudit.
+- Real order execution tidak dikerjakan sebelum ada security model, audit, emergency stop, dan dry-run yang matang.
 
-## 3. Prioritas Roadmap
+## 3. P0 - Validation dan Test Coverage
 
-### P0 - Reliability dan Data Safety
-
-Fokus: bot tidak kehilangan data penting dan tahan error runtime.
-
-- Durable state storage dengan adapter file dan database.
-- Opsi PostgreSQL untuk Railway production.
-- State migration dari `state.json` lama.
-- Atomic save untuk file state lokal.
-- Retry dan exponential backoff untuk request exchange dan Telegram.
-- Error throttling supaya Telegram tidak spam saat exchange bermasalah.
-- Config validation lebih kuat untuk symbol, timeframe, dan numeric env.
-- Graceful shutdown dengan final state save.
-
-### P1 - Telegram Command Interface
-
-Fokus: bot bisa dikontrol dan dimonitor langsung dari Telegram.
-
-- Command listener menggunakan Telegram `getUpdates` long polling.
-- Admin allowlist via env, misalnya `TELEGRAM_ADMIN_IDS`.
-- Command global: `/start`, `/help`, `/settings`.
-- Command monitoring: `/status`, `/performance`, `/open`, `/symbols`.
-- Command kontrol: `/pause`, `/resume`, `/scanonce`.
-- Inline keyboard sederhana untuk refresh status dan performance.
-- Penyimpanan offset update agar command tidak diproses ulang.
-
-### P2 - Trade Lifecycle Tracking
-
-Fokus: setiap sinyal punya update outcome yang jelas.
-
-- Tracking TP1, TP2, TP3, dan SL.
-- Notifikasi saat target tersentuh.
-- Status trade: `OPEN`, `TP1_HIT`, `TP2_HIT`, `TP3_HIT`, `SL_HIT`, `EXPIRED`.
-- Partial target tracking berdasarkan porsi TP1 dan TP2.
-- Estimasi PnL berbasis R dan persentase.
-- Fee dan slippage estimation optional.
-- Expiry logic untuk trade yang terlalu lama tidak menyentuh target atau SL.
-- Report performance berdasarkan R-multiple, bukan hanya winrate.
-
-### P3 - Backtesting dan Paper Trading
-
-Fokus: strategi bisa diuji sebelum digunakan.
-
-- Script backtest historis menggunakan CCXT OHLCV.
-- Mode input symbol, timeframe, tanggal mulai, tanggal akhir, dan strategy config.
-- Output summary: total trade, winrate, average R, max drawdown, profit factor, best/worst trade.
-- Export hasil ke JSON atau CSV.
-- Parameter sweep sederhana untuk `MIN_CONFIRM`, `MIN_RR`, `MAX_SAFE_SL_PERCENT`, dan filter utama.
-- Paper trading mode untuk forward-test tanpa eksekusi order.
-- Report paper trading harian/mingguan.
-
-### P4 - Strategy Upgrade
-
-Fokus: sinyal lebih adaptif terhadap market dan symbol.
-
-- Multi-timeframe confirmation, misalnya sinyal 15m hanya valid jika 1h/4h searah.
-- Strategy profiles seperti `scalping`, `swing`, `meme`, dan `major`.
-- Per-symbol override untuk parameter strategi.
-- Optional market regime filter: trending, ranging, high volatility, low volatility.
-- Optional funding rate filter untuk futures.
-- Optional open interest atau long/short ratio filter jika exchange mendukung.
-- Configurable cooldown antar sinyal per symbol.
-
-### P5 - Dashboard dan Observability
-
-Fokus: monitoring lebih mudah saat bot sudah stabil.
-
-- HTTP healthcheck endpoint optional.
-- Heartbeat report ke Telegram.
-- Structured logging.
-- Log level yang benar-benar dipakai dari `LOG_LEVEL`.
-- Uptime dan last successful scan tracking.
-- Dashboard ringan untuk open trades dan history.
-- Telegram Mini App sebagai opsi lanjutan.
-
-## 4. Rencana Implementasi Bertahap
-
-### Phase 1 - Fondasi Reliability
-
-Target: bot lebih aman untuk deployment jangka panjang.
+Fokus: memastikan engine yang sudah kompleks tidak salah hitung.
 
 Checklist:
 
-- Buat interface storage: `loadState`, `saveState`, `updateState`.
-- Pertahankan file storage sebagai default lokal.
-- Tambahkan database storage optional via `DATABASE_URL`.
-- Tambahkan state migration dari format lama.
-- Tambahkan retry helper untuk Telegram dan exchange calls.
-- Tambahkan error throttling agar error berulang tidak spam Telegram.
-- Tambahkan validasi config tambahan untuk env penting.
-- Update README untuk opsi storage production.
+- Tambah test untuk semua outcome lifecycle:
+  - TP1 lalu SL.
+  - TP1/TP2 lalu SL.
+  - TP1/TP2/TP3.
+  - EXPIRED.
+  - LIQUIDATED.
+  - TP dan SL dalam candle yang sama.
+- Tambah test untuk short trade, bukan hanya long.
+- Tambah test untuk fee, slippage, margin release, break-even, trailing stop.
+- Tambah test untuk config validation.
+- Tambah test untuk command role:
+  - viewer tidak bisa pause/resume/setpaper.
+  - operator bisa command kontrol.
+  - owner bisa semua command.
+- Tambah test untuk signal-quality filter:
+  - breakout ATR terlalu kecil ditolak.
+  - wick terlalu besar ditolak.
+  - fallback liquidity reject bekerja.
+- Tambah test untuk replay deterministic dengan fixture candle lokal.
 
 Kriteria selesai:
 
-- Bot tetap bisa jalan dengan file state tanpa perubahan env.
-- Jika `DATABASE_URL` diisi, state tersimpan di database.
-- Error exchange sementara tidak langsung membuat bot fatal.
-- Error berulang tidak mengirim pesan Telegram terus-menerus.
+- Coverage logic kritis lifecycle/risk/strategy/commands minimal cukup untuk mencegah regresi fatal.
+- `npm test` menjadi gate wajib sebelum deploy.
 
-### Phase 2 - Telegram Command Interface
+## 4. P1 - Exchange-Specific Futures Accuracy
 
-Target: user bisa cek dan kontrol bot dari Telegram.
+Fokus: paper trading makin mendekati kondisi exchange futures nyata.
 
 Checklist:
 
-- Buat module command handler, misalnya `src/commands.js`.
-- Tambahkan long polling `getUpdates` yang berjalan paralel dengan scanner.
-- Simpan `lastUpdateId` di state.
-- Tambahkan admin allowlist.
-- Implement `/start`, `/help`, `/status`, `/performance`, `/open`, `/symbols`.
-- Implement `/pause`, `/resume`, dan `/scanonce`.
-- Tambahkan response untuk command tidak dikenal.
-- Dokumentasikan command di README.
+- Tambah exchange profile:
+  - Bitget USDT swap.
+  - Binance USD-M futures.
+  - Bybit USDT perpetual.
+- Tambah maintenance margin tiers per exchange secara configurable.
+- Tambah mark-price mode jika exchange menyediakan data.
+- Tambah funding cost accrual:
+  - funding interval.
+  - estimated funding paid/received.
+  - total funding cost per trade.
+- Tambah taker/maker fee profile per exchange.
+- Tambah liquidation formula per exchange profile.
+- Tambah risk label:
+  - `SAFE`.
+  - `TIGHT`.
+  - `DANGEROUS`.
+  - `INVALID`.
+- Tambah command `/liq` untuk open paper positions.
 
 Kriteria selesai:
 
-- Command dari admin diproses.
-- Command dari non-admin ditolak.
-- Scanner bisa dipause dan diresume tanpa restart.
-- Status bot bisa dilihat dari Telegram.
+- Paper liquidation tidak lagi formula generic saja.
+- Report paper mencantumkan fee, slippage, funding, margin, dan liquidation distance.
 
-### Phase 3 - Signal Lifecycle Tracking
+## 5. P2 - Research Data Warehouse
 
-Target: setiap trade punya perjalanan yang lengkap.
+Fokus: dataset internal yang rapi untuk evaluasi strategi.
 
 Checklist:
 
-- Ubah struktur open trade agar menyimpan status TP1/TP2/TP3.
-- Update outcome checker agar mendeteksi TP1, TP2, TP3, dan SL.
-- Kirim notifikasi saat TP/SL tersentuh.
-- Tambahkan konservatisme saat TP dan SL tersentuh dalam candle yang sama.
-- Tambahkan R-multiple dan estimasi PnL per event.
-- Update weekly/monthly report agar menampilkan average R dan TP hit rate.
-- Tambahkan migration untuk trade lama yang hanya punya `tp2`.
+- Buat storage tabel/struktur untuk:
+  - candles.
+  - features.
+  - signal decisions.
+  - paper trade events.
+  - equity curve.
+  - rejected reason counts.
+- PostgreSQL schema terpisah dari `bot_state`.
+- Retention policy:
+  - raw candle retention.
+  - signal decision retention.
+  - paper trade retention.
+- Export command:
+  - `/export paper`.
+  - `/export decisions`.
+  - `/export equity`.
+- Export file CSV/JSON lokal via script.
+- Tambah `npm run export`.
+- Tambah `npm run ingest` untuk mengisi data candle historis.
 
 Kriteria selesai:
 
-- Trade tidak hanya selesai di TP2/SL.
-- User menerima update saat TP1/TP2/TP3/SL terjadi.
-- Performance report lebih informatif dari sekadar winrate.
+- Dataset bisa dianalisis di luar bot.
+- Replay tidak hanya bergantung pada fetch exchange live.
+- Setiap tuning parameter punya bukti historis.
 
-### Phase 4 - Backtesting Engine
+## 6. P3 - Strategy Lab dan Walk-Forward
 
-Target: strategi bisa diuji secara historis.
+Fokus: membandingkan konfigurasi strategi secara terukur.
 
 Checklist:
 
-- Buat script `src/backtest.js` atau folder `scripts/backtest.js`.
-- Ambil candle historis dari CCXT dengan pagination jika diperlukan.
-- Jalankan strategy pada candle tertutup secara iteratif.
-- Simulasikan trade lifecycle berdasarkan OHLC.
-- Tambahkan output summary di console.
-- Tambahkan export JSON/CSV.
-- Tambahkan script npm, misalnya `npm run backtest`.
-- Dokumentasikan contoh penggunaan.
+- Tambah `npm run walkforward`.
+- Tambah config experiment file, misalnya `experiments/*.json`.
+- Parameter sweep:
+  - `ENTRY_MODE`.
+  - `MIN_CONFIRM`.
+  - `MIN_RR`.
+  - `SAFE_SL_BUFFER_ATR`.
+  - `MIN_BREAKOUT_ATR`.
+  - HTF on/off.
+  - market regime filter.
+- Walk-forward split:
+  - train window.
+  - validation window.
+  - out-of-sample window.
+- Metrics:
+  - total trades.
+  - winrate.
+  - expectancy.
+  - average R.
+  - average PnL USDT.
+  - max drawdown.
+  - liquidation rate.
+  - profit factor.
+  - exposure time.
+  - rejected reason distribution.
+- Ranking hasil experiment.
+- Config hash dan strategy version pada setiap result.
 
 Kriteria selesai:
 
-- Backtest bisa dijalankan untuk minimal satu symbol dan timeframe.
-- Hasil menampilkan total trade, winrate, average R, max drawdown, dan profit factor.
-- Hasil bisa diekspor untuk analisis lanjutan.
+- Perubahan strategi tidak dipromosikan ke default tanpa hasil walk-forward.
+- Hasil experiment bisa dibandingkan antar symbol/timeframe.
 
-### Phase 5 - Paper Trading Mode
+## 7. P4 - Strategy Modularization v2
 
-Target: strategi bisa diuji live tanpa order real.
+Fokus: strategi tidak monolitik dan mudah dieksperimenkan.
 
 Checklist:
 
-- Tambahkan env `PAPER_TRADING_ENABLED`.
-- Simpan semua sinyal sebagai paper trade.
-- Hitung outcome menggunakan candle live berikutnya.
-- Tambahkan fee dan slippage optional.
-- Tambahkan report harian atau mingguan khusus paper trading.
-- Tambahkan command `/paper` untuk ringkasan paper trading.
+- Pisahkan module:
+  - `features/`
+  - `filters/`
+  - `entries/`
+  - `exits/`
+  - `risk/`
+  - `scoring/`
+- Strategy registry:
+  - `breakout_v1`.
+  - `breakout_retest_v1`.
+  - `pullback_trend_v1`.
+  - `liquidity_sweep_v1`.
+  - `funding_contrarian_v1`.
+- Weighted scoring dan confidence:
+  - `LOW`.
+  - `MEDIUM`.
+  - `HIGH`.
+- Per-symbol strategy assignment dari config.
+- Strategy comparison report.
 
 Kriteria selesai:
 
-- Paper trade berjalan tanpa mengganggu alert utama.
-- Hasil paper trading bisa dibandingkan dengan backtest.
-- User bisa melihat performa paper trading dari Telegram.
+- Menambah strategi baru tidak perlu mengubah scanner utama.
+- Replay/paper/live alert memakai interface strategi yang sama.
 
-### Phase 6 - Strategy Profiles dan Multi-Timeframe
+## 8. P5 - Advanced Signal Quality
 
-Target: strategi lebih fleksibel dan lebih mudah dituning.
+Fokus: mengurangi sinyal yang langsung kena SL.
 
 Checklist:
 
-- Tambahkan config strategy profile.
-- Tambahkan per-symbol config override.
-- Tambahkan fetch candle untuk higher timeframe.
-- Tambahkan filter trend HTF.
-- Tambahkan cooldown sinyal per symbol.
-- Tambahkan debug output agar alasan sinyal ditolak lebih jelas.
+- Retest state machine:
+  - breakout detected.
+  - retest pending.
+  - retest confirmed.
+  - invalidated.
+- Liquidity sweep detection:
+  - sweep previous high/low.
+  - close back inside range.
+  - reversal confirmation.
+- Market structure:
+  - higher high/higher low.
+  - lower high/lower low.
+  - break of structure.
+  - change of character.
+- Volatility regime:
+  - ATR percentile.
+  - range expansion/contraction.
+  - session volatility.
+- Volume quality:
+  - volume z-score.
+  - volume trend.
+  - abnormal wick rejection.
+- Symbol universe filter:
+  - minimum volume.
+  - maximum spread proxy.
+  - minimum candle quality.
 
 Kriteria selesai:
 
-- Symbol berbeda bisa memakai parameter berbeda.
-- Sinyal bisa difilter dengan trend timeframe lebih tinggi.
-- User bisa tuning strategi tanpa mengubah kode.
+- Bot bisa memilih antara breakout continuation, retest, pullback, dan reversal setup.
+- Rejected reason cukup detail untuk evaluasi strategi.
 
-### Phase 7 - Observability dan Dashboard
+## 9. P6 - Portfolio Risk dan Capital Allocation
 
-Target: monitoring production lebih nyaman.
+Fokus: paper account tidak hanya mengevaluasi trade tunggal.
 
 Checklist:
 
-- Tambahkan healthcheck HTTP server optional.
-- Tambahkan heartbeat Telegram harian atau per beberapa jam.
-- Tambahkan last scan success/failure di state.
-- Tambahkan structured logs.
-- Tambahkan dashboard ringan jika diperlukan.
-- Evaluasi Telegram Mini App jika dashboard web mulai kompleks.
+- Risk budget per symbol.
+- Risk budget per strategy.
+- Correlation group manual:
+  - major.
+  - meme.
+  - AI.
+  - L1.
+  - DeFi.
+- Max concurrent positions per group.
+- Volatility-targeted notional sizing berbasis ATR percentile.
+- Dynamic leverage cap dari:
+  - SL distance.
+  - liquidation distance.
+  - volatility regime.
+  - account drawdown.
+- Equity protection:
+  - reduce size after drawdown.
+  - stop trading after losing streak.
+  - resume rule after cooldown.
 
 Kriteria selesai:
 
-- User tahu bot masih hidup tanpa cek log manual.
-- Deployment platform bisa melakukan healthcheck.
-- Riwayat scan dan error mudah dilacak.
+- Paper trading menunjukkan portfolio exposure, bukan hanya trade list.
+- Risiko tidak terkonsentrasi pada symbol volatile yang berkorelasi.
 
-## 5. Urutan Eksekusi yang Direkomendasikan
+## 10. P7 - Dashboard v2
 
-Urutan paling pragmatis:
+Fokus: dashboard menjadi alat evaluasi, bukan hanya status page.
 
-1. Phase 1 - Fondasi Reliability.
-2. Phase 2 - Telegram Command Interface.
-3. Phase 3 - Signal Lifecycle Tracking.
-4. Phase 4 - Backtesting Engine.
-5. Phase 5 - Paper Trading Mode.
-6. Phase 6 - Strategy Profiles dan Multi-Timeframe.
-7. Phase 7 - Observability dan Dashboard.
+Checklist:
 
-Alasan urutan ini:
+- Equity curve interaktif.
+- Drawdown chart.
+- Per-symbol performance table.
+- Per-strategy performance table.
+- Rejected reason heatmap.
+- Open position liquidation distance.
+- Paper account exposure.
+- Funding/OI/long-short snapshot.
+- Filter by date/symbol/strategy.
+- Protected dashboard token optional.
 
-- Reliability harus lebih dulu karena fitur lain bergantung pada state yang aman.
-- Command Telegram membuat operasional harian jauh lebih mudah.
-- Lifecycle tracking membuat data performa lebih akurat.
-- Backtesting dan paper trading butuh lifecycle yang sudah matang.
-- Strategy upgrade lebih aman dilakukan setelah punya data evaluasi.
-- Dashboard sebaiknya dibuat setelah model data dan workflow stabil.
+Kriteria selesai:
 
-## 6. Risiko Teknis
+- User bisa mengevaluasi strategi dari dashboard tanpa membaca state JSON.
+- Dashboard aman jika dibuka di deployment publik.
 
-- Database migration bisa merusak state jika tidak ada backup.
-- Long polling Telegram harus disinkronkan agar tidak mengganggu scanner.
-- Backtest berbasis OHLC tidak tahu urutan intrabar, jadi perlu aturan konservatif.
-- Multi-timeframe fetch menambah beban request exchange.
-- Per-symbol config bisa membuat konfigurasi makin kompleks jika tidak didokumentasikan dengan baik.
-- Jika nanti menambah eksekusi order real, risiko keamanan dan finansial meningkat besar. Untuk saat ini bot sebaiknya tetap alert-only.
+## 11. P8 - Alert Quality dan Telegram UX
 
-## 7. Prinsip Implementasi
+Fokus: alert lebih actionable dan command lebih cepat dipakai.
 
-- Pertahankan backward compatibility untuk `state.json` yang sudah ada.
-- Default lokal harus tetap sederhana.
-- Fitur production seperti database dibuat optional via env.
-- Jangan membuat bot melakukan order real tanpa desain keamanan terpisah.
-- Semua perubahan besar harus punya dokumentasi env dan contoh penggunaan.
-- Tambahkan test untuk logic yang memengaruhi sinyal, state, dan outcome trade.
+Checklist:
 
-## 8. Definition of Done Umum
+- Alert confidence label.
+- Alert reason summary:
+  - top confirmations.
+  - top risks.
+  - rejection of alternate side.
+- Inline actions:
+  - view risk.
+  - view similar trades.
+  - disable symbol.
+  - pause paper.
+- `/compare SYMBOL`.
+- `/profile SYMBOL`.
+- `/setprofile SYMBOL PROFILE`.
+- `/experiment latest`.
+- Telegram file export untuk CSV/JSON.
+- Audit log command mutating lengkap.
 
-Setiap fase dianggap selesai jika:
+Kriteria selesai:
 
-- Kode lulus `npm run check`.
-- Fitur terdokumentasi di README atau dokumen terkait.
-- Default behavior lama tetap berjalan jika env baru tidak diisi.
-- Error utama sudah ditangani dengan pesan yang jelas.
-- Perubahan state memiliki migration atau fallback aman.
+- Telegram cukup untuk operasi harian tanpa dashboard.
+- Semua perubahan runtime tercatat.
+
+## 12. P9 - Production Operations
+
+Fokus: bot stabil 24/7 dan mudah dipulihkan.
+
+Checklist:
+
+- External uptime monitor guide.
+- Alert jika no successful scan > threshold.
+- Alert jika state save gagal.
+- Alert jika PostgreSQL lock gagal.
+- Alert jika Telegram send gagal berulang.
+- Automated state backup schedule.
+- Restore guide.
+- Railway deployment guide end-to-end.
+- Environment checklist production.
+- Runbook:
+  - exchange down.
+  - Telegram down.
+  - state corrupt.
+  - DB unavailable.
+  - duplicate instance detected.
+
+Kriteria selesai:
+
+- Ada prosedur jelas untuk incident umum.
+- Bot bisa dipulihkan tanpa menebak-nebak state.
+
+## 13. P10 - Real Execution Readiness Gate
+
+Fokus: hanya persiapan desain, belum implementasi order real.
+
+Checklist:
+
+- Threat model:
+  - leaked token.
+  - malicious command.
+  - duplicate instance.
+  - wrong symbol/market.
+  - runaway order.
+- Execution simulator:
+  - order sizing.
+  - reduce-only.
+  - post-only/market.
+  - partial fill.
+  - rejected order.
+- Required controls:
+  - owner-only execution commands.
+  - hard daily loss limit.
+  - hard max notional.
+  - exchange API key scope.
+  - emergency stop.
+  - dry-run mandatory.
+- Paper-to-real comparison report.
+- Manual approval checklist.
+
+Kriteria selesai:
+
+- Keputusan untuk real execution bisa dibuat berdasarkan dokumen risiko, bukan spontan.
+- Tidak ada order real sampai gate ini selesai dan disetujui manual.
+
+## 14. Urutan Eksekusi Direkomendasikan
+
+1. P0 - Validation dan Test Coverage.
+2. P1 - Exchange-Specific Futures Accuracy.
+3. P2 - Research Data Warehouse.
+4. P3 - Strategy Lab dan Walk-Forward.
+5. P5 - Advanced Signal Quality.
+6. P6 - Portfolio Risk dan Capital Allocation.
+7. P4 - Strategy Modularization v2.
+8. P7 - Dashboard v2.
+9. P8 - Alert Quality dan Telegram UX.
+10. P9 - Production Operations.
+11. P10 - Real Execution Readiness Gate.
+
+Alasan:
+
+- Test dan exchange accuracy harus dulu karena semua evaluasi bergantung pada hitungan lifecycle yang benar.
+- Dataset dan walk-forward harus mendahului tuning agresif.
+- Strategy modularization lebih aman setelah eksperimen menunjukkan bentuk strategi yang layak.
+- Real execution hanya boleh dibahas setelah paper system terbukti stabil.
+
+## 15. Definition of Done
+
+Setiap phase selesai jika:
+
+- `npm run check` lolos.
+- `npm test` lolos.
+- README dan `.env.example` diperbarui.
+- Default lama tetap aman.
+- State migration aman.
+- Ada reason code untuk keputusan baru.
+- Ada minimal satu test atau replay fixture untuk logic kritis.
+- Tidak ada fitur real order tanpa readiness gate.
+
+## 16. Keputusan Produk Saat Ini
+
+- Status produk: alert bot + paper trading + strategy research tool.
+- Prioritas berikutnya: validation, exchange-specific accuracy, dataset, dan walk-forward.
+- Real execution: tidak dikerjakan sampai P10 selesai.

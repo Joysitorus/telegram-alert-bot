@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { createDefaultState, loadState, normalizeState, saveState } from "./state.js";
 
 const stateRowId = "default";
@@ -6,6 +8,8 @@ class FileStateStore {
   constructor(stateFile) {
     this.type = "file";
     this.stateFile = stateFile;
+    this.lockFile = null;
+    this.lockHandle = null;
   }
 
   async load() {
@@ -16,7 +20,35 @@ class FileStateStore {
     saveState(this.stateFile, state);
   }
 
-  async close() {}
+  async close() {
+    await this.releaseLock();
+  }
+
+  async acquireLock(lockFile) {
+    if (!lockFile) return;
+    const directory = path.dirname(lockFile);
+    if (directory && directory !== "." && !fs.existsSync(directory)) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+    try {
+      this.lockHandle = fs.openSync(lockFile, "wx");
+      fs.writeFileSync(this.lockHandle, String(process.pid));
+      this.lockFile = lockFile;
+    } catch (error) {
+      throw new Error(`Instance lain kemungkinan sedang berjalan. Lock file aktif: ${lockFile}`);
+    }
+  }
+
+  async releaseLock() {
+    if (this.lockHandle !== null) {
+      fs.closeSync(this.lockHandle);
+      this.lockHandle = null;
+    }
+    if (this.lockFile && fs.existsSync(this.lockFile)) {
+      fs.unlinkSync(this.lockFile);
+      this.lockFile = null;
+    }
+  }
 }
 
 class PostgresStateStore {
@@ -74,7 +106,22 @@ class PostgresStateStore {
   }
 
   async close() {
+    await this.releaseLock();
     if (this.ready) await this.client.end();
+  }
+
+  async acquireLock() {
+    await this.init();
+    const result = await this.client.query("SELECT pg_try_advisory_lock($1) AS locked", [774411]);
+    if (!result.rows[0]?.locked) {
+      throw new Error("Instance lain kemungkinan sedang berjalan. PostgreSQL advisory lock gagal.");
+    }
+  }
+
+  async releaseLock() {
+    if (this.ready) {
+      await this.client.query("SELECT pg_advisory_unlock($1)", [774411]);
+    }
   }
 }
 

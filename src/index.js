@@ -1,14 +1,17 @@
 import ccxt from "ccxt";
 import { runCommandLoop } from "./commands.js";
-import { config, getStrategyConfigForSymbol, validateConfig } from "./config.js";
+import { config, getConfigHash, getStrategyConfigForSymbol, validateConfig } from "./config.js";
 import { startHealthServer } from "./health.js";
 import { createLogger, ErrorThrottler, withRetry } from "./reliability.js";
 import { analyzeSymbol } from "./strategy.js";
 import {
   addPaperTrade,
   getPairState,
+  getPaperAccountState,
   getPerformanceState,
   getRuntimeState,
+  recordMarketSnapshot,
+  recordSignalDecision,
   updatePairState,
   updatePaperTradeOutcomes,
   updateTradeOutcomes
@@ -112,10 +115,13 @@ function buildPerformanceReport(state, periodMs, now = Date.now()) {
 
 function buildPaperReport(state, periodMs, now = Date.now()) {
   const from = now - periodMs;
-  const paperTrades = getPerformanceState(state).paperTrades.filter((trade) => trade.openedAt >= from && trade.openedAt <= now);
+  const performance = getPerformanceState(state);
+  const account = getPaperAccountState(state, config.paper);
+  const paperTrades = performance.paperTrades.filter((trade) => trade.openedAt >= from && trade.openedAt <= now);
   const closed = paperTrades.filter((trade) => trade.outcome);
   const wins = closed.filter((trade) => trade.outcome === "TP3" || trade.tp2Hit).length;
   const losses = closed.filter((trade) => trade.outcome === "SL").length;
+  const liquidations = closed.filter((trade) => trade.outcome === "LIQUIDATED").length;
   const rSum = closed.reduce((sum, trade) => sum + (Number(trade.realizedR) || 0), 0);
 
   return {
@@ -126,8 +132,14 @@ function buildPaperReport(state, periodMs, now = Date.now()) {
     open: paperTrades.length - closed.length,
     wins,
     losses,
+    liquidations,
     winrate: closed.length > 0 ? wins / closed.length * 100 : 0,
-    avgR: closed.length > 0 ? rSum / closed.length : 0
+    avgR: closed.length > 0 ? rSum / closed.length : 0,
+    balance: account.balance,
+    usedMargin: account.usedMargin,
+    availableBalance: (Number(account.balance) || 0) - (Number(account.usedMargin) || 0),
+    realizedPnl: account.realizedPnl,
+    totalFees: account.totalFees
   };
 }
 
@@ -198,18 +210,144 @@ function signalPassesHigherTimeframe(signal, trend) {
   return (signal.direction === "BUY" && trend === "BULLISH") || (signal.direction === "SELL" && trend === "BEARISH");
 }
 
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+async function getFundingRateFilter(exchange, symbol, strategyConfig, signal = null) {
+  const enabled = strategyConfig.maxAbsFundingRate > 0 ||
+    strategyConfig.maxPositiveFundingLong > 0 ||
+    strategyConfig.maxNegativeFundingShort > 0;
+  if (!enabled) return { passes: true };
+  if (typeof exchange.fetchFundingRate !== "function") {
+    return { passes: false, reason: "funding_rate_unsupported" };
+  }
+
+  const funding = await withRetry(() => exchange.fetchFundingRate(symbol), {
+    retries: config.runtime.retryAttempts,
+    delayMs: config.runtime.retryDelayMs,
+    label: `fetchFundingRate ${symbol}`
+  });
+  const fundingRate = firstFiniteNumber(funding?.fundingRate, funding?.info?.fundingRate);
+
+  if (fundingRate === null) return { passes: false, reason: "funding_rate_unavailable" };
+
+  if (strategyConfig.maxAbsFundingRate > 0 && Math.abs(fundingRate) > strategyConfig.maxAbsFundingRate) {
+    return { passes: false, reason: "funding_rate_limit", metrics: { fundingRate } };
+  }
+  if (signal?.direction === "BUY" && strategyConfig.maxPositiveFundingLong > 0 && fundingRate > strategyConfig.maxPositiveFundingLong) {
+    return { passes: false, reason: "positive_funding_long_crowded", metrics: { fundingRate } };
+  }
+  if (signal?.direction === "SELL" && strategyConfig.maxNegativeFundingShort > 0 && fundingRate < -strategyConfig.maxNegativeFundingShort) {
+    return { passes: false, reason: "negative_funding_short_crowded", metrics: { fundingRate } };
+  }
+
+  return { passes: true, metrics: { fundingRate } };
+}
+
+async function getOpenInterestFilter(exchange, symbol, strategyConfig) {
+  const enabled = strategyConfig.minOpenInterest > 0 || strategyConfig.maxOpenInterest > 0;
+  if (!enabled) return { passes: true };
+  if (typeof exchange.fetchOpenInterest !== "function") {
+    return { passes: false, reason: "open_interest_unsupported" };
+  }
+
+  const openInterestData = await withRetry(() => exchange.fetchOpenInterest(symbol), {
+    retries: config.runtime.retryAttempts,
+    delayMs: config.runtime.retryDelayMs,
+    label: `fetchOpenInterest ${symbol}`
+  });
+  const openInterest = firstFiniteNumber(
+    openInterestData?.openInterestAmount,
+    openInterestData?.openInterestValue,
+    openInterestData?.baseVolume,
+    openInterestData?.quoteVolume,
+    openInterestData?.info?.openInterest
+  );
+
+  if (openInterest === null) return { passes: false, reason: "open_interest_unavailable" };
+  if (strategyConfig.minOpenInterest > 0 && openInterest < strategyConfig.minOpenInterest) {
+    return { passes: false, reason: "open_interest_below_min", metrics: { openInterest } };
+  }
+  if (strategyConfig.maxOpenInterest > 0 && openInterest > strategyConfig.maxOpenInterest) {
+    return { passes: false, reason: "open_interest_above_max", metrics: { openInterest } };
+  }
+
+  return { passes: true, metrics: { openInterest } };
+}
+
+async function getLongShortRatioFilter(exchange, symbol, strategyConfig) {
+  const enabled = strategyConfig.minLongShortRatio > 0 || strategyConfig.maxLongShortRatio > 0;
+  if (!enabled) return { passes: true };
+
+  let ratioData = null;
+  if (typeof exchange.fetchLongShortRatio === "function") {
+    ratioData = await withRetry(() => exchange.fetchLongShortRatio(symbol), {
+      retries: config.runtime.retryAttempts,
+      delayMs: config.runtime.retryDelayMs,
+      label: `fetchLongShortRatio ${symbol}`
+    });
+  } else if (typeof exchange.fetchLongShortRatioHistory === "function") {
+    const history = await withRetry(() => exchange.fetchLongShortRatioHistory(symbol, undefined, undefined, 1), {
+      retries: config.runtime.retryAttempts,
+      delayMs: config.runtime.retryDelayMs,
+      label: `fetchLongShortRatioHistory ${symbol}`
+    });
+    ratioData = Array.isArray(history) ? history.at(-1) : null;
+  } else {
+    return { passes: false, reason: "long_short_ratio_unsupported" };
+  }
+
+  const longShortRatio = firstFiniteNumber(
+    ratioData?.longShortRatio,
+    ratioData?.ratio,
+    ratioData?.info?.longShortRatio,
+    ratioData?.info?.longShortRatioValue
+  );
+
+  if (longShortRatio === null) return { passes: false, reason: "long_short_ratio_unavailable" };
+  if (strategyConfig.minLongShortRatio > 0 && longShortRatio < strategyConfig.minLongShortRatio) {
+    return { passes: false, reason: "long_short_ratio_below_min", metrics: { longShortRatio } };
+  }
+  if (strategyConfig.maxLongShortRatio > 0 && longShortRatio > strategyConfig.maxLongShortRatio) {
+    return { passes: false, reason: "long_short_ratio_above_max", metrics: { longShortRatio } };
+  }
+
+  return { passes: true, metrics: { longShortRatio } };
+}
+
+async function signalPassesMarketDataFilters(exchange, symbol, strategyConfig, signal = null) {
+  const checks = [
+    await getFundingRateFilter(exchange, symbol, strategyConfig, signal),
+    await getOpenInterestFilter(exchange, symbol, strategyConfig),
+    await getLongShortRatioFilter(exchange, symbol, strategyConfig)
+  ];
+  const failed = checks.find((check) => !check.passes);
+
+  return {
+    passes: !failed,
+    reason: failed?.reason || null,
+    metrics: checks.reduce((acc, check) => ({ ...acc, ...(check.metrics || {}) }), {})
+  };
+}
+
 async function notifyTradeEvents(events) {
   for (const event of events) {
     await notify(buildTradeEventMessage(event, config.runtime.priceDecimals));
   }
 }
 
-async function notify(text, chatId = config.telegram.chatId) {
+async function notify(text, chatId = config.telegram.chatId, replyMarkup = null) {
   await withRetry(
     () => sendTelegramMessage({
       botToken: config.telegram.botToken,
       chatId,
-      text
+      text,
+      replyMarkup
     }),
     {
       retries: config.runtime.retryAttempts,
@@ -223,10 +361,29 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const key = `${config.exchange.id}:${symbol}:${config.exchange.timeframe}`;
   const pairState = getPairState(state, key);
   const strategyConfig = getStrategyConfigForSymbol(symbol);
+  const runtime = getRuntimeState(state);
+  const paperEnabled = runtime.paperEnabledOverride ?? config.paper.enabled;
 
   const candles = await fetchClosedCandles(exchange, symbol);
-  const outcome = updateTradeOutcomes(state, key, candles);
-  const paperOutcome = config.paper.enabled ? updatePaperTradeOutcomes(state, key, candles) : { changed: false, events: [] };
+  const lastCandle = candles.at(-1);
+  if (lastCandle) {
+    recordMarketSnapshot(state, {
+      exchange: config.exchange.id,
+      symbol,
+      timeframe: config.exchange.timeframe,
+      candleTime: lastCandle.timestamp,
+      open: lastCandle.open,
+      high: lastCandle.high,
+      low: lastCandle.low,
+      close: lastCandle.close,
+      volume: lastCandle.volume
+    });
+  }
+  const lifecycleOptions = { maxOpenCandles: config.performance.tradeExpiryCandles };
+  const outcome = updateTradeOutcomes(state, key, candles, lifecycleOptions);
+  const paperOutcome = paperEnabled
+    ? updatePaperTradeOutcomes(state, key, candles, { ...lifecycleOptions, paperConfig: config.paper })
+    : { changed: false, events: [] };
 
   if (outcome.events.length > 0) await notifyTradeEvents(outcome.events);
   if (paperOutcome.events.length > 0) await notifyTradeEvents(paperOutcome.events);
@@ -256,12 +413,50 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   }
 
   if (analysis.hasSignal) {
+    const marketDataFilter = await signalPassesMarketDataFilters(exchange, symbol, strategyConfig, analysis.signal);
+    analysis.signal.marketDataFilters = marketDataFilter.metrics;
+    if (!marketDataFilter.passes) {
+      analysis.hasSignal = false;
+      analysis.debug = {
+        ...analysis.debug,
+        rejectedByMarketDataFilter: true,
+        marketDataFilterReason: marketDataFilter.reason,
+        marketDataFilters: marketDataFilter.metrics
+      };
+    }
+  }
+
+  if (analysis.hasSignal) {
+    analysis.signal.configHash = getConfigHash({ exchange: config.exchange, strategy: strategyConfig, paper: config.paper });
     const message = buildSignalMessage(analysis.signal, config.runtime.priceDecimals);
 
     await notify(message);
 
     updatePairState(state, key, analysis.signal);
-    if (config.paper.enabled) addPaperTrade(state, key, analysis.signal, config.paper);
+    let paperRejectReason = null;
+    if (paperEnabled) {
+      const paperResult = addPaperTrade(state, key, analysis.signal, config.paper);
+      if (!paperResult.added) {
+        paperRejectReason = paperResult.reason;
+        logger.warn("paper trade skipped", { symbol, reason: paperResult.reason });
+      }
+    }
+    recordSignalDecision(state, {
+      exchange: config.exchange.id,
+      symbol,
+      timeframe: config.exchange.timeframe,
+      accepted: true,
+      reason: null,
+      paperRejectReason,
+      direction: analysis.signal.direction,
+      entryMode: analysis.signal.entryMode,
+      score: analysis.signal.score,
+      rr: analysis.signal.rr,
+      slRiskPercent: analysis.signal.slRiskPercent,
+      strategyVersion: strategyConfig.version,
+      configHash: getConfigHash({ exchange: config.exchange, strategy: strategyConfig, paper: config.paper }),
+      debug: analysis.debug
+    });
     await stateStore.save(state);
 
     logger.info("signal", {
@@ -276,6 +471,17 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   }
 
   const debug = analysis.debug;
+  recordSignalDecision(state, {
+    exchange: config.exchange.id,
+    symbol,
+    timeframe: config.exchange.timeframe,
+    accepted: false,
+    reason: analysis.reason || getRejectedReason(debug),
+    strategyVersion: strategyConfig.version,
+    configHash: getConfigHash({ exchange: config.exchange, strategy: strategyConfig, paper: config.paper }),
+    debug
+  });
+  await stateStore.save(state);
   if (debug) {
     logger.info("scan", {
       symbol,
@@ -288,11 +494,26 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
       trend: debug.trend,
       candle: formatDateTime(debug.lastCandleTime),
       rejectedByHigherTimeframe: Boolean(debug.rejectedByHigherTimeframe),
-      higherTimeframeTrend: debug.higherTimeframeTrend
+      higherTimeframeTrend: debug.higherTimeframeTrend,
+      rejectedByMarketDataFilter: Boolean(debug.rejectedByMarketDataFilter),
+      marketDataFilterReason: debug.marketDataFilterReason,
+      marketRegime: debug.marketRegime?.labels?.join(",")
     });
   } else {
     logger.info("scan skipped", { symbol, reason: analysis.reason });
   }
+}
+
+function getRejectedReason(debug) {
+  if (!debug) return "no_debug";
+  if (debug.inCooldown) return "cooldown";
+  if (debug.rejectedByHigherTimeframe) return "higher_timeframe";
+  if (debug.rejectedByMarketDataFilter) return debug.marketDataFilterReason || "market_data_filter";
+  if (!debug.marketRegimeAllowed) return "market_regime";
+  if (debug.buyQuality?.rejectionReasons?.length || debug.sellQuality?.rejectionReasons?.length) {
+    return [...(debug.buyQuality?.rejectionReasons || []), ...(debug.sellQuality?.rejectionReasons || [])].join(",");
+  }
+  return "strategy_conditions";
 }
 
 async function sendHeartbeatIfDue(state, stateStore) {
@@ -342,7 +563,8 @@ async function sendMonthlyPerformanceReportIfDue(state, stateStore) {
 }
 
 async function sendPaperPerformanceReportIfDue(state, stateStore) {
-  if (!config.paper.enabled) return;
+  const runtime = getRuntimeState(state);
+  if (!(runtime.paperEnabledOverride ?? config.paper.enabled)) return;
 
   const now = Date.now();
   const reportKey = getWeeklyReportKey(now, config.performance);
@@ -361,6 +583,10 @@ async function scanAll({ exchange, state, stateStore, errorThrottler }) {
   runtime.lastScanAt = Date.now();
 
   for (const symbol of config.exchange.symbols) {
+    if (runtime.pausedSymbols?.[symbol]) {
+      logger.info("symbol paused", { symbol });
+      continue;
+    }
     try {
       await scanSymbol({ exchange, state, stateStore, symbol });
     } catch (error) {
@@ -424,7 +650,11 @@ async function main() {
   }
 
   stateStore = createStateStore(config.runtime);
+  if (config.runtime.singleInstanceLockEnabled) {
+    await stateStore.acquireLock(config.runtime.lockFile);
+  }
   const state = await stateStore.load();
+  runStartupSelfCheck({ exchange, state });
   const appStatus = { scanRequested: false };
   const errorThrottler = new ErrorThrottler(config.runtime.errorAlertCooldownSeconds * 1000);
   healthServer = startHealthServer({ config, state, getStatus: () => (isShuttingDown ? "shutting_down" : "running") });
@@ -477,6 +707,20 @@ async function main() {
   await commandLoop;
   if (healthServer) healthServer.close();
   await stateStore.close();
+}
+
+function runStartupSelfCheck({ exchange, state }) {
+  const runtime = getRuntimeState(state);
+  const missingSymbols = config.exchange.symbols.filter((symbol) => !exchange.markets[symbol]);
+  if (missingSymbols.length > 0) {
+    logger.warn("startup self-check missing symbols", { missingSymbols });
+  }
+  logger.info("startup self-check", {
+    stateSchemaVersion: state.schemaVersion,
+    storage: stateStore?.type,
+    telegramConfigured: Boolean(config.telegram.botToken && config.telegram.chatId),
+    paused: runtime.paused
+  });
 }
 
 process.on("SIGINT", () => {

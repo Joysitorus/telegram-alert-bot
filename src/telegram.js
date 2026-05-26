@@ -1,18 +1,22 @@
 import axios from "axios";
 import { escapeHtml, formatDateTime, formatNumber, formatPrice } from "./utils.js";
 
-export async function sendTelegramMessage({ botToken, chatId, text }) {
+export async function sendTelegramMessage({ botToken, chatId, text, replyMarkup = null }) {
   if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN belum diisi.");
   if (!chatId) throw new Error("TELEGRAM_CHAT_ID belum diisi.");
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
 
-  await axios.post(url, {
+  const payload = {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true
-  }, {
+  };
+
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+
+  await axios.post(url, payload, {
     timeout: 15000
   });
 }
@@ -36,10 +40,12 @@ ${directionEmoji} <b>${escapeHtml(signal.direction)} SIGNAL</b>
 <b>TP1:</b> <code>${escapeHtml(formatPrice(signal.tp1, priceDecimals))}</code>
 <b>TP2:</b> <code>${escapeHtml(formatPrice(signal.tp2, priceDecimals))}</code>
 <b>TP3 Smart Liquidity:</b> <code>${escapeHtml(formatPrice(signal.tp3, priceDecimals))}</code>
+<b>Exit Portions:</b> TP1 ${escapeHtml(formatNumber((signal.tp1ExitPortion ?? 0) * 100, 2))}% / TP2 ${escapeHtml(formatNumber((signal.tp2ExitPortion ?? 0) * 100, 2))}% / TP3 ${escapeHtml(formatNumber((signal.tp3ExitPortion ?? 0) * 100, 2))}%
 
 <b>RR TP3:</b> ${escapeHtml(formatNumber(signal.rr, 2))}R
 <b>Probability:</b> ${escapeHtml(String(signal.probability))}%
 <b>Score:</b> ${escapeHtml(String(signal.score))}/7
+<b>Market Regime:</b> ${escapeHtml(signal.marketRegime?.labels?.join(", ") || "-")}
 
 <b>Liquidity Source:</b> ${escapeHtml(signal.liquiditySource)}
 <b>Liquidity Score:</b> ${escapeHtml(formatNumber(signal.liquidityScore, 2))}
@@ -62,8 +68,15 @@ export function buildTradeEventMessage(event, priceDecimals = 12) {
 <b>Direction:</b> ${escapeHtml(trade.direction)}
 <b>Timeframe:</b> ${escapeHtml(trade.timeframe)}
 <b>Exit:</b> <code>${escapeHtml(formatPrice(trade.exit, priceDecimals))}</code>
-<b>R:</b> ${escapeHtml(formatNumber(trade.realizedR, 2))}R
-<b>PnL:</b> ${escapeHtml(formatNumber(trade.pnlPercent, 2))}%
+<b>Exit Portion:</b> ${escapeHtml(formatNumber((trade.exitPortion ?? 1) * 100, 2))}%
+<b>Event R:</b> ${escapeHtml(formatNumber(trade.eventR ?? trade.realizedR, 2))}R
+<b>Total R:</b> ${escapeHtml(formatNumber(trade.realizedR, 2))}R
+<b>Event PnL:</b> ${escapeHtml(formatNumber(trade.eventPnlPercent ?? trade.pnlPercent, 2))}%
+<b>Total PnL:</b> ${escapeHtml(formatNumber(trade.pnlPercent, 2))}%
+<b>Event PnL USDT:</b> ${escapeHtml(formatNumber(trade.eventPnlUsdt, 4))}
+<b>Total PnL USDT:</b> ${escapeHtml(formatNumber(trade.realizedPnlUsdt, 4))}
+<b>Fees USDT:</b> ${escapeHtml(formatNumber(trade.totalFeesUsdt, 4))}
+<b>Liquidation:</b> <code>${escapeHtml(formatPrice(trade.liquidationPrice, priceDecimals))}</code>
 <b>Candle:</b> ${escapeHtml(formatDateTime(event.candleTime))}
 `.trim();
 }
@@ -130,8 +143,14 @@ export function buildPaperPerformanceMessage(report) {
 <b>Open:</b> ${escapeHtml(String(report.open))}
 <b>Wins:</b> ${escapeHtml(String(report.wins))}
 <b>Losses:</b> ${escapeHtml(String(report.losses))}
+<b>Liquidations:</b> ${escapeHtml(String(report.liquidations))}
 <b>Winrate:</b> ${escapeHtml(formatNumber(report.winrate, 2))}%
 <b>Avg R:</b> ${escapeHtml(formatNumber(report.avgR, 2))}R
+<b>Balance:</b> ${escapeHtml(formatNumber(report.balance, 2))} USDT
+<b>Used Margin:</b> ${escapeHtml(formatNumber(report.usedMargin, 2))} USDT
+<b>Available:</b> ${escapeHtml(formatNumber(report.availableBalance, 2))} USDT
+<b>Realized PnL:</b> ${escapeHtml(formatNumber(report.realizedPnl, 2))} USDT
+<b>Total Fees:</b> ${escapeHtml(formatNumber(report.totalFees, 2))} USDT
 `.trim();
 }
 

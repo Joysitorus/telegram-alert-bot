@@ -13,6 +13,8 @@ export const config = {
     botToken: process.env.TELEGRAM_BOT_TOKEN || "",
     chatId: process.env.TELEGRAM_CHAT_ID || "",
     adminIds: parseCsv(process.env.TELEGRAM_ADMIN_IDS || "", []),
+    operatorIds: parseCsv(process.env.TELEGRAM_OPERATOR_IDS || "", []),
+    viewerIds: parseCsv(process.env.TELEGRAM_VIEWER_IDS || "", []),
     sendStartupMessage: toBoolean(process.env.SEND_STARTUP_MESSAGE, true),
     alertErrors: toBoolean(process.env.ALERT_ERRORS, false),
     commandsEnabled: toBoolean(process.env.TELEGRAM_COMMANDS_ENABLED, true),
@@ -39,14 +41,35 @@ export const config = {
     errorAlertCooldownSeconds: toNumber(process.env.ERROR_ALERT_COOLDOWN_SECONDS, 900, { min: 30, max: 86400 }),
     healthcheckEnabled: toBoolean(process.env.HEALTHCHECK_ENABLED, false),
     healthcheckPort: toNumber(process.env.PORT || process.env.HEALTHCHECK_PORT, 3000, { min: 1, max: 65535 }),
+    dashboardEnabled: toBoolean(process.env.DASHBOARD_ENABLED, false),
     heartbeatEnabled: toBoolean(process.env.HEARTBEAT_ENABLED, false),
-    heartbeatIntervalHours: toNumber(process.env.HEARTBEAT_INTERVAL_HOURS, 24, { min: 1, max: 168 })
+    heartbeatIntervalHours: toNumber(process.env.HEARTBEAT_INTERVAL_HOURS, 24, { min: 1, max: 168 }),
+    singleInstanceLockEnabled: toBoolean(process.env.SINGLE_INSTANCE_LOCK_ENABLED, true),
+    lockFile: process.env.LOCK_FILE || "./bot.lock",
+    dataRetentionDays: toNumber(process.env.DATA_RETENTION_DAYS, 30, { min: 1, max: 3650 })
   },
 
   paper: {
     enabled: toBoolean(process.env.PAPER_TRADING_ENABLED, false),
     feePercent: toNumber(process.env.PAPER_TRADING_FEE_PERCENT, 0, { min: 0, max: 5 }),
-    slippagePercent: toNumber(process.env.PAPER_TRADING_SLIPPAGE_PERCENT, 0, { min: 0, max: 5 })
+    slippagePercent: toNumber(process.env.PAPER_TRADING_SLIPPAGE_PERCENT, 0, { min: 0, max: 5 }),
+    initialBalance: toNumber(process.env.PAPER_TRADING_INITIAL_BALANCE, 100, { min: 0 }),
+    positionNotional: toNumber(process.env.PAPER_TRADING_POSITION_NOTIONAL, 500, { min: 0 }),
+    leverage: toNumber(process.env.PAPER_TRADING_LEVERAGE, 75, { min: 1, max: 125 }),
+    maintenanceMarginPercent: toNumber(process.env.PAPER_TRADING_MAINTENANCE_MARGIN_PERCENT, 0.5, { min: 0, max: 10 }),
+    maxOpenTrades: toNumber(process.env.PAPER_TRADING_MAX_OPEN_TRADES, 0, { min: 0, max: 1000 }),
+    riskMode: process.env.PAPER_TRADING_RISK_MODE || "fixed_notional",
+    fixedMargin: toNumber(process.env.PAPER_TRADING_FIXED_MARGIN, 0, { min: 0 }),
+    riskPercentEquity: toNumber(process.env.PAPER_TRADING_RISK_PERCENT_EQUITY, 1, { min: 0, max: 100 }),
+    maxLossUsdt: toNumber(process.env.PAPER_TRADING_MAX_LOSS_USDT, 0, { min: 0 }),
+    maxLossPercentEquity: toNumber(process.env.PAPER_TRADING_MAX_LOSS_PERCENT_EQUITY, 0, { min: 0, max: 100 }),
+    minLiquidationBufferPercent: toNumber(process.env.PAPER_TRADING_MIN_LIQUIDATION_BUFFER_PERCENT, 0, { min: 0, max: 100 }),
+    dailyLossLimitUsdt: toNumber(process.env.PAPER_TRADING_DAILY_LOSS_LIMIT_USDT, 0, { min: 0 }),
+    maxDrawdownPercent: toNumber(process.env.PAPER_TRADING_MAX_DRAWDOWN_PERCENT, 0, { min: 0, max: 100 }),
+    maxOpenNotional: toNumber(process.env.PAPER_TRADING_MAX_OPEN_NOTIONAL, 0, { min: 0 }),
+    maxUsedMargin: toNumber(process.env.PAPER_TRADING_MAX_USED_MARGIN, 0, { min: 0 }),
+    breakEvenAfterTp1: toBoolean(process.env.PAPER_TRADING_BREAK_EVEN_AFTER_TP1, false),
+    trailAfterTp2: toBoolean(process.env.PAPER_TRADING_TRAIL_AFTER_TP2, false)
   },
 
   performance: {
@@ -56,7 +79,8 @@ export const config = {
     reportDay: toNumber(process.env.PERFORMANCE_REPORT_DAY, 1, { min: 0, max: 6 }),
     reportHour: toNumber(process.env.PERFORMANCE_REPORT_HOUR, 8, { min: 0, max: 23 }),
     monthlyReportDay: toNumber(process.env.MONTHLY_PERFORMANCE_REPORT_DAY, 1, { min: 1, max: 28 }),
-    monthlyReportHour: toNumber(process.env.MONTHLY_PERFORMANCE_REPORT_HOUR, 8, { min: 0, max: 23 })
+    monthlyReportHour: toNumber(process.env.MONTHLY_PERFORMANCE_REPORT_HOUR, 8, { min: 0, max: 23 }),
+    tradeExpiryCandles: toNumber(process.env.TRADE_EXPIRY_CANDLES, 0, { min: 0, max: 100000 })
   },
 
   strategy: {
@@ -98,12 +122,33 @@ export const config = {
 
     tp1Portion: toNumber(process.env.TP1_PORTION, 0.33, { min: 0.05, max: 0.95 }),
     tp2Portion: toNumber(process.env.TP2_PORTION, 0.66, { min: 0.05, max: 0.99 }),
+    tp1ExitPortion: toNumber(process.env.TP1_EXIT_PORTION, 0.33, { min: 0, max: 1 }),
+    tp2ExitPortion: toNumber(process.env.TP2_EXIT_PORTION, 0.33, { min: 0, max: 1 }),
+    version: process.env.STRATEGY_VERSION || "breakout_v1",
+    entryMode: process.env.ENTRY_MODE || "breakout_close",
+    minBreakoutAtr: toNumber(process.env.MIN_BREAKOUT_ATR, 0, { min: 0, max: 20 }),
+    maxBreakoutExtensionAtr: toNumber(process.env.MAX_BREAKOUT_EXTENSION_ATR, 0, { min: 0, max: 100 }),
+    minCandleBodyPercent: toNumber(process.env.MIN_CANDLE_BODY_PERCENT, 0, { min: 0, max: 100 }),
+    maxEntryWickPercent: toNumber(process.env.MAX_ENTRY_WICK_PERCENT, 100, { min: 0, max: 100 }),
+    minVolumeRatio: toNumber(process.env.MIN_VOLUME_RATIO, 0, { min: 0, max: 100 }),
+    rejectFallbackLiquidityTarget: toBoolean(process.env.REJECT_FALLBACK_LIQUIDITY_TARGET, false),
+    ignoreLastDirectionBlock: toBoolean(process.env.IGNORE_LAST_DIRECTION_BLOCK, false),
     profile: process.env.STRATEGY_PROFILE || "",
     customProfiles: parseJson(process.env.STRATEGY_PROFILES_JSON, {}),
     symbolOverrides: parseJson(process.env.SYMBOL_STRATEGY_OVERRIDES_JSON, {}),
     higherTimeframe: process.env.HIGHER_TIMEFRAME || "",
     requireHigherTimeframeTrend: toBoolean(process.env.REQUIRE_HIGHER_TIMEFRAME_TREND, false),
-    cooldownSeconds: toNumber(process.env.SIGNAL_COOLDOWN_SECONDS, 0, { min: 0, max: 86400 })
+    cooldownSeconds: toNumber(process.env.SIGNAL_COOLDOWN_SECONDS, 0, { min: 0, max: 86400 }),
+    marketRegimeFilter: parseCsv(process.env.MARKET_REGIME_FILTER || "", []),
+    marketRegimeTrendAdx: toNumber(process.env.MARKET_REGIME_TREND_ADX, 25, { min: 1, max: 100 }),
+    marketRegimeHighVolAtrPercent: toNumber(process.env.MARKET_REGIME_HIGH_VOL_ATR_PERCENT, 2, { min: 0.01, max: 100 }),
+    maxAbsFundingRate: toNumber(process.env.MAX_ABS_FUNDING_RATE, 0, { min: 0, max: 1 }),
+    maxPositiveFundingLong: toNumber(process.env.MAX_POSITIVE_FUNDING_LONG, 0, { min: 0, max: 1 }),
+    maxNegativeFundingShort: toNumber(process.env.MAX_NEGATIVE_FUNDING_SHORT, 0, { min: 0, max: 1 }),
+    minOpenInterest: toNumber(process.env.MIN_OPEN_INTEREST, 0, { min: 0 }),
+    maxOpenInterest: toNumber(process.env.MAX_OPEN_INTEREST, 0, { min: 0 }),
+    minLongShortRatio: toNumber(process.env.MIN_LONG_SHORT_RATIO, 0, { min: 0 }),
+    maxLongShortRatio: toNumber(process.env.MAX_LONG_SHORT_RATIO, 0, { min: 0 })
   }
 };
 
@@ -113,12 +158,33 @@ export function getStrategyConfigForSymbol(symbol) {
     ...config.strategy.customProfiles
   }[config.strategy.profile] || {};
   const symbolOverrides = config.strategy.symbolOverrides[symbol] || {};
-
-  return {
+  const strategyConfig = {
     ...config.strategy,
     ...profileOverrides,
     ...symbolOverrides
   };
+
+  return {
+    ...strategyConfig,
+    tp3ExitPortion: Math.max(0, 1 - strategyConfig.tp1ExitPortion - strategyConfig.tp2ExitPortion)
+  };
+}
+
+export function getConfigHash(value = config) {
+  const json = stableStringify(value);
+  let hash = 0;
+  for (let index = 0; index < json.length; index += 1) {
+    hash = ((hash << 5) - hash + json.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(16);
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export function validateConfig() {
@@ -145,8 +211,37 @@ export function validateConfig() {
     errors.push("TP1_PORTION harus lebih kecil dari TP2_PORTION.");
   }
 
+  if (config.strategy.tp1ExitPortion + config.strategy.tp2ExitPortion > 1) {
+    errors.push("TP1_EXIT_PORTION + TP2_EXIT_PORTION tidak boleh lebih dari 1.");
+  }
+
   if (config.strategy.higherTimeframe && !/^\d+[mhdwM]$/.test(config.strategy.higherTimeframe)) {
     errors.push("HIGHER_TIMEFRAME tidak valid. Contoh valid: 1h, 4h, 1d.");
+  }
+
+  const validRegimes = new Set(["trending", "ranging", "high_volatility", "low_volatility"]);
+  for (const regime of config.strategy.marketRegimeFilter) {
+    if (!validRegimes.has(regime)) {
+      errors.push(`MARKET_REGIME_FILTER tidak valid: ${regime}. Gunakan trending,ranging,high_volatility,low_volatility.`);
+    }
+  }
+
+  if (config.strategy.maxOpenInterest > 0 && config.strategy.minOpenInterest > config.strategy.maxOpenInterest) {
+    errors.push("MIN_OPEN_INTEREST tidak boleh lebih besar dari MAX_OPEN_INTEREST.");
+  }
+
+  if (config.strategy.maxLongShortRatio > 0 && config.strategy.minLongShortRatio > config.strategy.maxLongShortRatio) {
+    errors.push("MIN_LONG_SHORT_RATIO tidak boleh lebih besar dari MAX_LONG_SHORT_RATIO.");
+  }
+
+  const validEntryModes = new Set(["breakout_close", "breakout_retest", "pullback_trend"]);
+  if (!validEntryModes.has(config.strategy.entryMode)) {
+    errors.push("ENTRY_MODE tidak valid. Gunakan breakout_close, breakout_retest, atau pullback_trend.");
+  }
+
+  const validRiskModes = new Set(["fixed_notional", "fixed_margin", "risk_percent_equity", "volatility_target"]);
+  if (!validRiskModes.has(config.paper.riskMode)) {
+    errors.push("PAPER_TRADING_RISK_MODE tidak valid. Gunakan fixed_notional, fixed_margin, risk_percent_equity, atau volatility_target.");
   }
 
   if (errors.length > 0) {

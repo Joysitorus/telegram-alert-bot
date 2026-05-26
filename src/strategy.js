@@ -20,6 +20,81 @@ function getProbability(score) {
   return 0;
 }
 
+function getMarketRegime({ adxValue, atrValue, close, cfg }) {
+  const atrPercent = close > 0 && atrValue > 0 ? atrValue / close * 100 : 0;
+  const trendRegime = adxValue >= cfg.marketRegimeTrendAdx ? "trending" : "ranging";
+  const volatilityRegime = atrPercent >= cfg.marketRegimeHighVolAtrPercent ? "high_volatility" : "low_volatility";
+
+  return {
+    trendRegime,
+    volatilityRegime,
+    atrPercent,
+    labels: [trendRegime, volatilityRegime]
+  };
+}
+
+function passesMarketRegimeFilter(marketRegime, cfg) {
+  const filters = (cfg.marketRegimeFilter || []).map((item) => String(item).toLowerCase());
+  if (filters.length === 0) return true;
+
+  const trendFilters = filters.filter((item) => item === "trending" || item === "ranging");
+  const volatilityFilters = filters.filter((item) => item === "high_volatility" || item === "low_volatility");
+  const trendPasses = trendFilters.length === 0 || trendFilters.includes(marketRegime.trendRegime);
+  const volatilityPasses = volatilityFilters.length === 0 || volatilityFilters.includes(marketRegime.volatilityRegime);
+
+  return trendPasses && volatilityPasses;
+}
+
+function getCandleQuality(candle, volumeMaValue) {
+  const range = candle.high - candle.low;
+  const body = Math.abs(candle.close - candle.open);
+  const upperWick = candle.high - Math.max(candle.close, candle.open);
+  const lowerWick = Math.min(candle.close, candle.open) - candle.low;
+
+  return {
+    bodyPercent: range > 0 ? body / range * 100 : 0,
+    upperWickPercent: range > 0 ? upperWick / range * 100 : 0,
+    lowerWickPercent: range > 0 ? lowerWick / range * 100 : 0,
+    volumeRatio: volumeMaValue > 0 ? candle.volume / volumeMaValue : 0
+  };
+}
+
+function passesSignalQuality({ side, current, prevHigh, prevLow, atrValue, emaFastValue, quality, liquidity, cfg }) {
+  const rejectionReasons = [];
+  const breakoutDistanceAtr = side === "BUY"
+    ? atrValue > 0 ? (current.close - prevHigh) / atrValue : 0
+    : atrValue > 0 ? (prevLow - current.close) / atrValue : 0;
+  const extensionAtr = atrValue > 0 ? Math.abs(current.close - emaFastValue) / atrValue : 0;
+  const entryWickPercent = side === "BUY" ? quality.upperWickPercent : quality.lowerWickPercent;
+
+  if (cfg.entryMode === "breakout_close" && breakoutDistanceAtr < cfg.minBreakoutAtr) {
+    rejectionReasons.push("breakout_atr_too_small");
+  }
+  if (cfg.maxBreakoutExtensionAtr > 0 && extensionAtr > cfg.maxBreakoutExtensionAtr) {
+    rejectionReasons.push("breakout_extension_too_far");
+  }
+  if (quality.bodyPercent < cfg.minCandleBodyPercent) {
+    rejectionReasons.push("body_too_small");
+  }
+  if (entryWickPercent > cfg.maxEntryWickPercent) {
+    rejectionReasons.push("entry_wick_too_large");
+  }
+  if (cfg.minVolumeRatio > 0 && quality.volumeRatio < cfg.minVolumeRatio) {
+    rejectionReasons.push("volume_ratio_too_low");
+  }
+  if (cfg.rejectFallbackLiquidityTarget && liquidity.source === "fallback_min_rr") {
+    rejectionReasons.push("fallback_liquidity_target");
+  }
+
+  return {
+    passes: rejectionReasons.length === 0,
+    rejectionReasons,
+    breakoutDistanceAtr,
+    extensionAtr,
+    entryWickPercent
+  };
+}
+
 function getOrderBlockScore({ displacementAtr, volumeRatio, age, zoneAtr }) {
   const displacementScore = Math.min(displacementAtr, 4) * 20;
   const volumeScore = Math.min(volumeRatio, 3) * 15;
@@ -327,9 +402,15 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
 
   const prevHigh = highest(highs, i - 1, cfg.breakoutLength);
   const prevLow = lowest(lows, i - 1, cfg.breakoutLength);
+  const prevPrevHigh = highest(highs, i - 2, cfg.breakoutLength);
+  const prevPrevLow = lowest(lows, i - 2, cfg.breakoutLength);
 
   const bullBreakout = current.close > prevHigh;
   const bearBreakout = current.close < prevLow;
+  const bullRetest = previous.close > prevPrevHigh && current.low <= prevPrevHigh && current.close > prevPrevHigh;
+  const bearRetest = previous.close < prevPrevLow && current.high >= prevPrevLow && current.close < prevPrevLow;
+  const buyPullbackTrend = current.close > emaLong[i] && emaFast[i] > emaMid[i] && current.low <= emaFast[i] && current.close > emaFast[i];
+  const sellPullbackTrend = current.close < emaLong[i] && emaFast[i] < emaMid[i] && current.high >= emaFast[i] && current.close < emaFast[i];
 
   const higherHigh = current.high > previous.high && current.low > previous.low;
   const lowerLow = current.low < previous.low && current.high < previous.high;
@@ -359,6 +440,14 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
 
   const buyScore = buyConfirmations.filter(Boolean).length;
   const sellScore = sellConfirmations.filter(Boolean).length;
+  const candleQuality = getCandleQuality(current, volumeMa[i]);
+  const marketRegime = getMarketRegime({
+    adxValue: dmiValues.adx[i],
+    atrValue: atrValues[i],
+    close: current.close,
+    cfg
+  });
+  const marketRegimeAllowed = passesMarketRegimeFilter(marketRegime, cfg);
 
   const buyProb = getProbability(buyScore);
   const sellProb = getProbability(sellScore);
@@ -450,25 +539,58 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
   const sellTP1 = sellEntry - sellDistance * cfg.tp1Portion;
   const sellTP2 = sellEntry - sellDistance * cfg.tp2Portion;
 
-  const buySignalRaw = buyScore >= cfg.minConfirm && bullBreakout;
-  const sellSignalRaw = sellScore >= cfg.minConfirm && bearBreakout;
+  const buyEntryPattern = cfg.entryMode === "breakout_retest"
+    ? bullRetest
+    : cfg.entryMode === "pullback_trend" ? buyPullbackTrend : bullBreakout;
+  const sellEntryPattern = cfg.entryMode === "breakout_retest"
+    ? bearRetest
+    : cfg.entryMode === "pullback_trend" ? sellPullbackTrend : bearBreakout;
+
+  const buySignalRaw = buyScore >= cfg.minConfirm && buyEntryPattern;
+  const sellSignalRaw = sellScore >= cfg.minConfirm && sellEntryPattern;
 
   const buyRRValid = buyLiquidity.rr >= cfg.minRR;
   const sellRRValid = sellLiquidity.rr >= cfg.minRR;
 
   const buyOrderBlockValid = !cfg.requireOrderBlock || buyOrderBlock.valid;
   const sellOrderBlockValid = !cfg.requireOrderBlock || sellOrderBlock.valid;
+  const buyQuality = passesSignalQuality({
+    side: "BUY",
+    current,
+    prevHigh,
+    prevLow,
+    atrValue: atrValues[i],
+    emaFastValue: emaFast[i],
+    quality: candleQuality,
+    liquidity: buyLiquidity,
+    cfg
+  });
+  const sellQuality = passesSignalQuality({
+    side: "SELL",
+    current,
+    prevHigh,
+    prevLow,
+    atrValue: atrValues[i],
+    emaFastValue: emaFast[i],
+    quality: candleQuality,
+    liquidity: sellLiquidity,
+    cfg
+  });
 
-  const buySignal = buySignalRaw && buyRRValid && buyOrderBlockValid && buySafeSl.valid;
-  const sellSignal = sellSignalRaw && sellRRValid && sellOrderBlockValid && sellSafeSl.valid;
+  const buySignal = buySignalRaw && buyRRValid && buyOrderBlockValid && buySafeSl.valid && marketRegimeAllowed && buyQuality.passes;
+  const sellSignal = sellSignalRaw && sellRRValid && sellOrderBlockValid && sellSafeSl.valid && marketRegimeAllowed && sellQuality.passes;
 
   let signal = null;
 
-  if (!inCooldown && buySignal && pairState.lastDirection !== 1 && pairState.lastSignalCandleTime !== current.timestamp) {
+  const buyDirectionAllowed = cfg.ignoreLastDirectionBlock || pairState.lastDirection !== 1;
+  const sellDirectionAllowed = cfg.ignoreLastDirectionBlock || pairState.lastDirection !== -1;
+
+  if (!inCooldown && buySignal && buyDirectionAllowed && pairState.lastSignalCandleTime !== current.timestamp) {
     signal = {
       direction: "BUY",
       directionValue: 1,
       exchange: exchangeId,
+      strategyVersion: cfg.version,
       symbol,
       timeframe,
       candleTime: current.timestamp,
@@ -478,6 +600,9 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       tp1: buyTP1,
       tp2: buyTP2,
       tp3: buyTP3,
+      tp1ExitPortion: cfg.tp1ExitPortion,
+      tp2ExitPortion: cfg.tp2ExitPortion,
+      tp3ExitPortion: cfg.tp3ExitPortion,
       rr: buyLiquidity.rr,
       probability: buyProb,
       score: buyScore,
@@ -490,16 +615,20 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       orderBlockAge: buyOrderBlock.age,
       slRiskPercent: buySafeSl.riskPercent,
       slSource: buySafeSl.source,
+      marketRegime,
       trend: current.close > emaLong[i] ? "BULLISH" : current.close < emaLong[i] ? "BEARISH" : "NEUTRAL",
+      entryMode: cfg.entryMode,
+      signalQuality: buyQuality,
       confirmations: buyConfirmations
     };
   }
 
-  if (!inCooldown && sellSignal && pairState.lastDirection !== -1 && pairState.lastSignalCandleTime !== current.timestamp) {
+  if (!inCooldown && sellSignal && sellDirectionAllowed && pairState.lastSignalCandleTime !== current.timestamp) {
     signal = {
       direction: "SELL",
       directionValue: -1,
       exchange: exchangeId,
+      strategyVersion: cfg.version,
       symbol,
       timeframe,
       candleTime: current.timestamp,
@@ -509,6 +638,9 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       tp1: sellTP1,
       tp2: sellTP2,
       tp3: sellTP3,
+      tp1ExitPortion: cfg.tp1ExitPortion,
+      tp2ExitPortion: cfg.tp2ExitPortion,
+      tp3ExitPortion: cfg.tp3ExitPortion,
       rr: sellLiquidity.rr,
       probability: sellProb,
       score: sellScore,
@@ -521,7 +653,10 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       orderBlockAge: sellOrderBlock.age,
       slRiskPercent: sellSafeSl.riskPercent,
       slSource: sellSafeSl.source,
+      marketRegime,
       trend: current.close > emaLong[i] ? "BULLISH" : current.close < emaLong[i] ? "BEARISH" : "NEUTRAL",
+      entryMode: cfg.entryMode,
+      signalQuality: sellQuality,
       confirmations: sellConfirmations
     };
   }
@@ -541,6 +676,11 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       sellProb,
       bullBreakout,
       bearBreakout,
+      bullRetest,
+      bearRetest,
+      buyPullbackTrend,
+      sellPullbackTrend,
+      entryMode: cfg.entryMode,
       buyRR: buyLiquidity.rr,
       sellRR: sellLiquidity.rr,
       buyOrderBlockValid: buyOrderBlock.valid,
@@ -553,6 +693,11 @@ export function analyzeSymbol({ exchangeId, symbol, timeframe, candles, strategy
       sellSlSource: sellSafeSl.source,
       buyLiquiditySource: buyLiquidity.source,
       sellLiquiditySource: sellLiquidity.source,
+      marketRegime,
+      marketRegimeAllowed,
+      candleQuality,
+      buyQuality,
+      sellQuality,
       trend: current.close > emaLong[i] ? "BULLISH" : current.close < emaLong[i] ? "BEARISH" : "NEUTRAL",
       inCooldown
     }

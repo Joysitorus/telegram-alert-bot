@@ -1,192 +1,53 @@
 # Telegram Crypto Alert Bot
 
-Bot ini menggantikan kebutuhan alert TradingView berbayar dengan cara mengambil data candle langsung dari exchange melalui CCXT, menghitung indikator teknikal, menentukan sinyal BUY/SELL, lalu mengirim notifikasi ke Telegram.
+Bot alert crypto berbasis Node.js yang mengambil candle market publik lewat CCXT, menghitung strategi teknikal, mengirim sinyal ke Telegram, dan menyimpan simulasi paper trading futures-style untuk evaluasi strategi.
 
-Bot ini cocok untuk:
+Status saat ini: **alert bot + paper trading + strategy research tool**.
 
-- alert crypto tanpa TradingView Premium
-- monitoring PEPE, BTC, ETH, atau pair lain
-- deployment di Railway sebagai Worker
-- strategi berbasis EMA, RSI, MACD, ADX, volume, safe-zone SL, order block, dan smart liquidity TP
+Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat sampai readiness gate, audit keamanan, emergency stop, dan dry-run selesai.
 
-> Bot ini hanya mengirim alert. Bot ini **tidak melakukan eksekusi order**.
+## Ringkasan Fitur
 
----
+- Scanner multi-symbol dari exchange yang didukung CCXT.
+- Market spot dan swap/perpetual melalui konfigurasi `EXCHANGE` dan `MARKET_TYPE`.
+- Strategi EMA, RSI, MACD, ADX, volume, breakout, safe-zone SL, order block, smart liquidity TP, market regime, higher timeframe, funding, open interest, dan long/short ratio.
+- Signal-quality filter untuk mengurangi sinyal yang rawan langsung kena SL.
+- Trade lifecycle: `OPEN`, `TP1_HIT`, `TP2_HIT`, `TP3_HIT`, `SL_HIT`, `EXPIRED`, dan `LIQUIDATED`.
+- Partial exit TP1/TP2/TP3, fee/slippage, break-even setelah TP1, trailing setelah TP2.
+- Paper trading futures-style dengan initial balance, notional, leverage, margin, liquidation, daily loss limit, drawdown limit, max notional, dan max used margin.
+- Telegram command center dengan role admin/operator/viewer dan inline keyboard.
+- State storage lokal atau PostgreSQL.
+- State migration backup dan schema version.
+- Single-instance lock untuk mencegah dua process memproses state yang sama.
+- Health endpoint, dashboard HTML, dashboard JSON, dan Prometheus metrics.
+- Replay baseline via `npm run replay`.
+- Test suite via `npm test`.
+- Railway deployment config via `railway.json`.
 
-## 1. Cara Kerja
-
-Alur kerja bot:
+## Cara Kerja
 
 ```text
 Exchange public API
-        ↓
-CCXT fetchOHLCV
-        ↓
-Ambil candle tertutup
-        ↓
-Hitung indikator teknikal
-        ↓
-Cek sinyal BUY / SELL
-        ↓
-Hitung Entry, SL, TP1, TP2, TP3
-        ↓
-Kirim alert ke Telegram
+  -> CCXT fetchOHLCV
+  -> candle tertutup
+  -> hitung indikator dan market context
+  -> jalankan filter strategi dan risk guard
+  -> kirim alert Telegram
+  -> simpan signal decision dan paper trade
+  -> update lifecycle TP/SL/liquidation pada candle berikutnya
 ```
 
-Bot menggunakan data candle OHLCV dari exchange. Di CCXT, method `fetchOHLCV` digunakan untuk mengambil historical candlestick data. CCXT sendiri menyediakan akses ke market data, indikator, backtesting, bot trading, dan banyak exchange melalui satu library.
+Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL tersentuh dalam candle yang sama, lifecycle dihitung konservatif karena data OHLC tidak memberi urutan intrabar.
 
----
+## Instalasi Lokal
 
-## 2. Fitur
-
-- Ambil candle market publik dari Binance, Bitget, Binance Futures, dan exchange lain yang didukung CCXT.
-- Tidak perlu TradingView.
-- Tidak perlu webhook TradingView.
-- Tidak perlu API key untuk market data publik.
-- Kirim alert langsung ke Telegram Bot.
-- Support command Telegram untuk cek status, performance, pause, resume, dan scan manual.
-- Support multi-symbol.
-- Support Railway Worker.
-- Menghindari alert duplikat dengan `state.json` atau PostgreSQL via `DATABASE_URL`.
-- SL dinamis di luar order block/swing dengan buffer ATR.
-- TP3 menggunakan smart liquidity target.
-- TP1 dan TP2 otomatis mengikuti jarak menuju TP3.
-- Score probabilitas berdasarkan 7 konfirmasi teknikal.
-- RR minimal ke TP3 bisa diatur.
-
----
-
-## 3. Strategi yang Dipakai
-
-Bot menghitung 7 konfirmasi untuk BUY dan SELL.
-
-### BUY confirmation
-
-1. Close di atas EMA 200
-2. EMA 20 di atas EMA 50
-3. RSI di atas 50
-4. MACD histogram positif dan naik
-5. Volume di atas Volume MA
-6. Higher high atau breakout high sebelumnya
-7. ADX di atas 20 dan DI+ di atas DI-
-
-### SELL confirmation
-
-1. Close di bawah EMA 200
-2. EMA 20 di bawah EMA 50
-3. RSI di bawah 50
-4. MACD histogram negatif dan turun
-5. Volume di atas Volume MA
-6. Lower low atau breakdown low sebelumnya
-7. ADX di atas 20 dan DI- di atas DI+
-
-Default minimal konfirmasi:
-
-```env
-MIN_CONFIRM=5
-```
-
-Artinya sinyal hanya muncul jika minimal 5 dari 7 konfirmasi terpenuhi.
-
----
-
-## 4. Safe-Zone SL
-
-SL tidak lagi memakai jarak fixed 2% dari entry. Bot menempatkan SL di area invalidasi yang lebih aman:
-
-- Untuk BUY: di bawah order block low atau recent swing low, ditambah buffer ATR.
-- Untuk SELL: di atas order block high atau recent swing high, ditambah buffer ATR.
-
-Default:
-
-```env
-SAFE_SL_LOOKBACK=20
-SAFE_SL_BUFFER_ATR=0.35
-MAX_SAFE_SL_PERCENT=5.0
-```
-
-Jika jarak SL lebih besar dari `MAX_SAFE_SL_PERCENT`, sinyal ditolak agar risiko tidak terlalu lebar.
-
-Untuk BUY:
-
-```text
-SL = min(order block low, recent swing low) - ATR buffer
-```
-
-Untuk SELL:
-
-```text
-SL = max(order block high, recent swing high) + ATR buffer
-```
-
----
-
-## 5. Smart Liquidity TP
-
-TP3 tidak hanya memakai target RR statis. Bot mencari pivot high atau pivot low historis yang dianggap sebagai area liquidity.
-
-### Untuk BUY
-
-Target TP3 dicari dari pivot high di atas entry.
-
-### Untuk SELL
-
-Target TP3 dicari dari pivot low di bawah entry.
-
-Setiap kandidat liquidity diberi score berdasarkan:
-
-- jumlah touch di area tersebut
-- volume di sekitar level
-- RR yang dihasilkan
-- bonus jika searah trend EMA 200
-- penalti jika target terlalu jauh berdasarkan ATR
-
-Jika tidak ada liquidity target yang valid, bot memakai fallback:
-
-```text
-TP3 = Entry ± minimal RR
-```
-
-Default:
-
-```env
-MIN_RR=3.0
-```
-
----
-
-## 6. Struktur Folder
-
-```text
-telegram-crypto-alert-bot/
-├── src/
-│   ├── index.js        # entry point bot
-│   ├── config.js       # membaca ENV dan validasi config
-│   ├── indicators.js   # EMA, RSI, MACD, ATR, ADX, pivot
-│   ├── strategy.js     # logic sinyal dan smart liquidity TP
-│   ├── telegram.js     # format dan kirim pesan Telegram
-│   ├── state.js        # menyimpan state agar tidak spam alert
-│   └── utils.js        # helper umum
-├── .env.example
-├── .gitignore
-├── package.json
-├── README.md
-└── LICENSE
-```
-
----
-
-## 7. Instalasi Lokal
-
-Pastikan Node.js versi 18 atau lebih baru sudah terinstall.
-
-Install dependency:
+Butuh Node.js 18 atau lebih baru.
 
 ```bash
 npm install
 ```
 
-Copy `.env.example` menjadi `.env`:
+Copy konfigurasi:
 
 ```bash
 cp .env.example .env
@@ -198,7 +59,17 @@ Di Windows PowerShell:
 copy .env.example .env
 ```
 
-Edit `.env` dan isi token Telegram serta setting exchange.
+Isi minimal:
+
+```env
+TELEGRAM_BOT_TOKEN=isi_token_bot_telegram_kamu
+TELEGRAM_CHAT_ID=isi_chat_id_telegram_kamu
+EXCHANGE=bitget
+MARKET_TYPE=swap
+SYMBOLS=SUI/USDT:USDT,PEPE/USDT:USDT
+TIMEFRAME=15m
+CHECK_INTERVAL_SECONDS=300
+```
 
 Jalankan bot:
 
@@ -212,64 +83,178 @@ Scan sekali saja:
 npm run once
 ```
 
----
+## Script NPM
 
-## 8. Cara Membuat Telegram Bot
-
-1. Buka Telegram.
-2. Chat ke `@BotFather`.
-3. Kirim `/newbot`.
-4. Ikuti instruksi sampai mendapat token.
-5. Isi token ke `.env`:
-
-```env
-TELEGRAM_BOT_TOKEN=token_dari_botfather
+```bash
+npm start       # menjalankan scanner normal
+npm run once    # scan satu kali lalu exit
+npm run replay  # replay baseline dari candle exchange
+npm run check   # syntax check file JS utama
+npm test        # menjalankan test Node.js
 ```
 
-Untuk mendapatkan `TELEGRAM_CHAT_ID`:
+## Struktur Project
 
-1. Kirim `/start` ke bot kamu.
-2. Buka URL berikut di browser:
+```text
+telegram-crypto-alert-bot/
+|-- src/
+|   |-- index.js        # entry point scanner
+|   |-- config.js       # env config, validation, config hash
+|   |-- strategy.js     # sinyal, filters, TP/SL, market context
+|   |-- indicators.js   # indikator teknikal
+|   |-- state.js        # state, lifecycle, paper trading, risk guard
+|   |-- storage.js      # file/PostgreSQL storage dan locking
+|   |-- commands.js     # Telegram commands dan role access
+|   |-- telegram.js     # formatter dan sender Telegram
+|   |-- health.js       # /health, /dashboard, /dashboard.json, /metrics
+|   |-- replay.js       # replay baseline
+|   |-- reliability.js  # retry dan error cooldown
+|   `-- utils.js        # helper umum
+|-- test/
+|   `-- state.test.js
+|-- .env.example
+|-- railway.json
+|-- package.json
+|-- ROADMAP.md
+`-- README.md
+```
+
+## Telegram Setup
+
+1. Chat `@BotFather`.
+2. Jalankan `/newbot`.
+3. Simpan token ke `TELEGRAM_BOT_TOKEN`.
+4. Kirim `/start` ke bot.
+5. Ambil chat id dari:
 
 ```text
 https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates
 ```
 
-3. Cari bagian:
+6. Isi `TELEGRAM_CHAT_ID`.
 
-```json
-"chat": { "id": 123456789 }
-```
-
-4. Isi ke `.env`:
+Command polling aktif secara default:
 
 ```env
-TELEGRAM_CHAT_ID=123456789
+TELEGRAM_COMMANDS_ENABLED=true
+TELEGRAM_COMMAND_POLL_TIMEOUT_SECONDS=25
 ```
 
-Telegram Bot API adalah HTTP-based interface untuk developer yang ingin membuat bot Telegram. Bot ini memakai endpoint `sendMessage` melalui HTTP POST.
-
----
-
-## 9. Contoh `.env` untuk Bitget Perpetual
+Role command:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456789:AAxxxx
-TELEGRAM_CHAT_ID=123456789
+TELEGRAM_ADMIN_IDS=
+TELEGRAM_OPERATOR_IDS=
+TELEGRAM_VIEWER_IDS=
+```
 
+Jika `TELEGRAM_ADMIN_IDS` kosong, hanya `TELEGRAM_CHAT_ID` yang boleh memakai command. Admin dan operator bisa menjalankan command kontrol. Viewer hanya untuk command baca.
+
+## Command Telegram
+
+- `/start` dan `/help` - bantuan command.
+- `/status` - status scanner, scan terakhir, dan error terakhir.
+- `/performance` - performa all-time.
+- `/paper` - ringkasan paper trading.
+- `/risk` - exposure, margin, daily PnL, liquidation, dan kill switch.
+- `/equity` - alias ringkasan saldo paper.
+- `/drawdown` - drawdown paper account.
+- `/rejected` - alasan sinyal atau paper trade ditolak.
+- `/lastsignal SYMBOL` - keputusan terakhir untuk symbol tertentu.
+- `/why SYMBOL` - alias untuk melihat alasan terakhir.
+- `/backup` - ringkasan state untuk backup cepat.
+- `/open` - trade terbuka.
+- `/symbols` - daftar symbol yang dipantau.
+- `/settings` - setting utama bot.
+- `/pause` - pause scanner.
+- `/resume` - lanjutkan scanner.
+- `/scanonce` - jadwalkan scan manual sekali.
+- `/setpaper on|off|default` - override paper trading runtime.
+- `/setpaused SYMBOL on|off` - pause/resume symbol tertentu.
+
+## Konfigurasi Exchange
+
+Contoh Bitget USDT perpetual:
+
+```env
 EXCHANGE=bitget
 MARKET_TYPE=swap
-SYMBOLS=PEPE/USDT:USDT,BTC/USDT:USDT
+SYMBOLS=SUI/USDT:USDT,PEPE/USDT:USDT,TAO/USDT:USDT,ENA/USDT:USDT
 TIMEFRAME=15m
 CANDLE_LIMIT=1000
-CHECK_INTERVAL_SECONDS=60
+CHECK_INTERVAL_SECONDS=300
+```
 
+Contoh Binance spot:
+
+```env
+EXCHANGE=binance
+MARKET_TYPE=spot
+SYMBOLS=BTC/USDT,ETH/USDT
+TIMEFRAME=15m
+CANDLE_LIMIT=1000
+CHECK_INTERVAL_SECONDS=300
+```
+
+Contoh Binance USD-M futures:
+
+```env
+EXCHANGE=binanceusdm
+MARKET_TYPE=swap
+SYMBOLS=BTC/USDT:USDT,1000PEPE/USDT:USDT
+TIMEFRAME=15m
+CANDLE_LIMIT=1000
+CHECK_INTERVAL_SECONDS=300
+```
+
+Format symbol futures bisa berbeda antar exchange. Jika symbol tidak ditemukan, cek format market CCXT untuk exchange tersebut.
+
+## Strategi
+
+Konfirmasi utama BUY:
+
+1. Close di atas EMA 200.
+2. EMA 20 di atas EMA 50.
+3. RSI di atas 50.
+4. MACD histogram positif dan naik.
+5. Volume di atas volume moving average.
+6. Breakout high sebelumnya.
+7. ADX kuat dan DI+ di atas DI-.
+
+Konfirmasi utama SELL:
+
+1. Close di bawah EMA 200.
+2. EMA 20 di bawah EMA 50.
+3. RSI di bawah 50.
+4. MACD histogram negatif dan turun.
+5. Volume di atas volume moving average.
+6. Breakdown low sebelumnya.
+7. ADX kuat dan DI- di atas DI+.
+
+Default:
+
+```env
+MIN_CONFIRM=5
+MIN_RR=3.0
+```
+
+### Safe-Zone SL
+
+SL tidak memakai jarak fixed. Bot mencari area invalidasi dari order block dan recent swing, lalu menambah buffer ATR.
+
+```env
 SAFE_SL_LOOKBACK=20
 SAFE_SL_BUFFER_ATR=0.35
 MAX_SAFE_SL_PERCENT=5.0
-MIN_RR=3.0
-MIN_CONFIRM=5
+```
 
+Jika jarak SL melebihi `MAX_SAFE_SL_PERCENT`, sinyal ditolak.
+
+### Smart Liquidity TP
+
+TP3 dicari dari pivot high/low historis yang dianggap sebagai area liquidity. Kandidat diberi score dari jumlah touch, volume, RR, trend EMA 200, dan jarak ATR.
+
+```env
 LIQUIDITY_TOUCH_LOOKBACK=150
 MAX_LIQUIDITY_CANDIDATES=40
 LIQUIDITY_TOLERANCE_ATR=0.35
@@ -277,20 +262,148 @@ MIN_LIQUIDITY_TOUCHES=2
 MAX_TARGET_ATR_DISTANCE=20.0
 ```
 
----
-
-## 10. Contoh `.env` untuk Binance Spot
+### Order Block
 
 ```env
-TELEGRAM_BOT_TOKEN=123456789:AAxxxx
-TELEGRAM_CHAT_ID=123456789
+REQUIRE_ORDER_BLOCK=true
+ORDER_BLOCK_LOOKBACK=120
+ORDER_BLOCK_IMPULSE_LOOKAHEAD=6
+ORDER_BLOCK_MIN_DISPLACEMENT_ATR=1.2
+ORDER_BLOCK_MAX_ZONE_ATR=2.0
+ORDER_BLOCK_MAX_ENTRY_DISTANCE_ATR=1.5
+MIN_ORDER_BLOCK_SCORE=60
+```
 
-EXCHANGE=binance
-MARKET_TYPE=spot
-SYMBOLS=PEPE/USDT,BTC/USDT
-TIMEFRAME=15m
-CANDLE_LIMIT=1000
-CHECK_INTERVAL_SECONDS=60
+### Signal-Quality Filter
+
+Filter ini dibuat untuk menolak sinyal yang entry-nya terlalu lemah, terlalu jauh, atau kualitas candle/volume-nya buruk.
+
+```env
+ENTRY_MODE=breakout_close
+MIN_BREAKOUT_ATR=0
+MAX_BREAKOUT_EXTENSION_ATR=0
+MIN_CANDLE_BODY_PERCENT=0
+MAX_ENTRY_WICK_PERCENT=100
+MIN_VOLUME_RATIO=0
+REJECT_FALLBACK_LIQUIDITY_TARGET=false
+IGNORE_LAST_DIRECTION_BLOCK=false
+```
+
+`ENTRY_MODE` mendukung:
+
+- `breakout_close`
+- `breakout_retest`
+- `pullback_trend`
+
+### Profile, Override, HTF, dan Market Regime
+
+```env
+STRATEGY_PROFILE=
+STRATEGY_VERSION=breakout_v1
+STRATEGY_PROFILES_JSON=
+SYMBOL_STRATEGY_OVERRIDES_JSON=
+HIGHER_TIMEFRAME=
+REQUIRE_HIGHER_TIMEFRAME_TREND=false
+SIGNAL_COOLDOWN_SECONDS=0
+MARKET_REGIME_FILTER=
+MARKET_REGIME_TREND_ADX=25
+MARKET_REGIME_HIGH_VOL_ATR_PERCENT=2
+```
+
+`MARKET_REGIME_FILTER` bisa berisi:
+
+- `trending`
+- `ranging`
+- `high_volatility`
+- `low_volatility`
+
+Override per symbol memakai JSON:
+
+```env
+SYMBOL_STRATEGY_OVERRIDES_JSON={"BTC/USDT:USDT":{"minConfirm":6,"minRR":2.5}}
+```
+
+### Futures Context Filter
+
+Filter ini tergantung dukungan exchange CCXT. Jika filter diaktifkan tetapi exchange tidak menyediakan data, sinyal bisa ditolak dan reason disimpan.
+
+```env
+MAX_ABS_FUNDING_RATE=0
+MAX_POSITIVE_FUNDING_LONG=0
+MAX_NEGATIVE_FUNDING_SHORT=0
+MIN_OPEN_INTEREST=0
+MAX_OPEN_INTEREST=0
+MIN_LONG_SHORT_RATIO=0
+MAX_LONG_SHORT_RATIO=0
+```
+
+Nilai `0` berarti filter nonaktif.
+
+## Paper Trading Futures-Style
+
+Paper trading menyimpan sinyal sebagai simulasi trade, tanpa order real.
+
+```env
+PAPER_TRADING_ENABLED=false
+PAPER_TRADING_INITIAL_BALANCE=100
+PAPER_TRADING_POSITION_NOTIONAL=500
+PAPER_TRADING_LEVERAGE=75
+PAPER_TRADING_MAINTENANCE_MARGIN_PERCENT=0.5
+PAPER_TRADING_FEE_PERCENT=0
+PAPER_TRADING_SLIPPAGE_PERCENT=0
+PAPER_TRADING_MAX_OPEN_TRADES=0
+```
+
+Contoh:
+
+- Saldo awal: `100 USDT`
+- Notional per entry: `500 USDT`
+- Leverage: `75x`
+- Initial margin kira-kira: `500 / 75 = 6.67 USDT`
+
+PnL dihitung dari notional, bukan dari margin. Pergerakan harga 1% pada posisi `500 USDT` menghasilkan sekitar `5 USDT` sebelum fee/slippage.
+
+Jika liquidation price tersentuh sebelum TP/SL, outcome paper menjadi `LIQUIDATED`. Jika saldo tersedia tidak cukup untuk margin dan entry fee, alert utama tetap bisa dikirim, tetapi paper trade ditolak dan reason tercatat di `/rejected`.
+
+### Paper Risk Guard
+
+```env
+PAPER_TRADING_RISK_MODE=fixed_notional
+PAPER_TRADING_FIXED_MARGIN=0
+PAPER_TRADING_RISK_PERCENT_EQUITY=1
+PAPER_TRADING_MAX_LOSS_USDT=0
+PAPER_TRADING_MAX_LOSS_PERCENT_EQUITY=0
+PAPER_TRADING_MIN_LIQUIDATION_BUFFER_PERCENT=0
+PAPER_TRADING_DAILY_LOSS_LIMIT_USDT=0
+PAPER_TRADING_MAX_DRAWDOWN_PERCENT=0
+PAPER_TRADING_MAX_OPEN_NOTIONAL=0
+PAPER_TRADING_MAX_USED_MARGIN=0
+PAPER_TRADING_BREAK_EVEN_AFTER_TP1=false
+PAPER_TRADING_TRAIL_AFTER_TP2=false
+```
+
+Risk mode:
+
+- `fixed_notional` - setiap sinyal memakai `PAPER_TRADING_POSITION_NOTIONAL`.
+- `fixed_margin` - notional dihitung dari `PAPER_TRADING_FIXED_MARGIN * leverage`.
+- `risk_percent_equity` - sizing mengikuti estimasi loss ke SL.
+- `volatility_target` - saat ini memakai basis risk-percent, disiapkan untuk volatility scaling.
+
+Paper trade bisa ditolak jika:
+
+- liquidation price berada sebelum SL.
+- estimasi max loss melebihi batas.
+- daily loss limit tercapai.
+- max drawdown tercapai.
+- max open notional tercapai.
+- max used margin tercapai.
+- saldo tidak cukup untuk margin dan fee.
+
+## Performance Report
+
+Bot menyimpan trade lifecycle dan mengirim laporan mingguan/bulanan jika diaktifkan.
+
+```env
 WEEKLY_PERFORMANCE_REPORT_ENABLED=true
 MONTHLY_PERFORMANCE_REPORT_ENABLED=true
 PERFORMANCE_REPORT_TIMEZONE=Asia/Jakarta
@@ -298,475 +411,249 @@ PERFORMANCE_REPORT_DAY=1
 PERFORMANCE_REPORT_HOUR=8
 MONTHLY_PERFORMANCE_REPORT_DAY=1
 MONTHLY_PERFORMANCE_REPORT_HOUR=8
+TRADE_EXPIRY_CANDLES=0
+TP1_EXIT_PORTION=0.33
+TP2_EXIT_PORTION=0.33
 ```
 
----
+`PERFORMANCE_REPORT_DAY` memakai `0` untuk Minggu sampai `6` untuk Sabtu.
 
-## 11. Contoh `.env` untuk Binance USD-M Futures
+Metrics yang dilacak meliputi winrate, TP hit rate, average R, average PnL, paper balance, drawdown, rejected trade, liquidation, dan open exposure.
+
+## Storage dan State
+
+Default memakai file lokal:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456789:AAxxxx
-TELEGRAM_CHAT_ID=123456789
-
-EXCHANGE=binanceusdm
-MARKET_TYPE=swap
-SYMBOLS=1000PEPE/USDT:USDT,BTC/USDT:USDT
-TIMEFRAME=15m
-CANDLE_LIMIT=1000
-CHECK_INTERVAL_SECONDS=60
+STATE_FILE=./state.json
 ```
 
-Catatan: format symbol futures di CCXT bisa berbeda antar exchange. Jika bot memberi warning symbol tidak ditemukan, cek daftar market exchange atau coba format symbol lain.
+Untuk production, gunakan PostgreSQL:
 
----
+```env
+DATABASE_URL=postgresql://user:password@host:5432/database
+```
 
-## 12. Deploy ke Railway
+Jika `DATABASE_URL` diisi, bot memakai PostgreSQL dan membuat state table yang dibutuhkan. Saat migrasi awal, state file lama bisa dibaca lalu disimpan ke database.
 
-1. Push project ini ke GitHub.
-2. Buka Railway.
-3. Pilih **New Project**.
-4. Pilih **Deploy from GitHub repo**.
-5. Pilih repository bot ini.
-6. Railway akan mendeteksi `package.json` dan menjalankan `npm start`.
-7. Masuk ke service Railway.
-8. Buka tab **Variables**.
-9. Tambahkan environment variable dari `.env.example`.
+Runtime guard:
 
-Railway menyediakan tab Variables untuk mengatur variable service. Untuk project Node.js, Railway dapat deploy dari GitHub dan mendeteksi app Node.js dari `package.json`.
+```env
+SINGLE_INSTANCE_LOCK_ENABLED=true
+LOCK_FILE=./bot.lock
+DATA_RETENTION_DAYS=30
+```
 
----
+File storage memakai lock file lokal. PostgreSQL memakai advisory lock.
 
-## 13. Railway Variables yang Wajib
+## Health, Dashboard, dan Metrics
 
-Isi di Railway:
+```env
+HEALTHCHECK_ENABLED=false
+HEALTHCHECK_PORT=3000
+DASHBOARD_ENABLED=false
+```
+
+Endpoint:
+
+- `GET /health` - status scanner, last successful scan, dan error terakhir.
+- `GET /dashboard` - dashboard HTML ringan.
+- `GET /dashboard.json` - snapshot dashboard.
+- `GET /metrics` - Prometheus metrics.
+
+Catatan: `health.js` hanya start server jika `HEALTHCHECK_ENABLED=true` atau `DASHBOARD_ENABLED=true`. Endpoint `/metrics` tersedia pada server yang sama.
+
+## Reliability Runtime
+
+```env
+RETRY_ATTEMPTS=3
+RETRY_DELAY_MS=1000
+ERROR_ALERT_COOLDOWN_SECONDS=900
+LOG_LEVEL=info
+SEND_STARTUP_MESSAGE=true
+ALERT_ERRORS=true
+HEARTBEAT_ENABLED=false
+HEARTBEAT_INTERVAL_HOURS=24
+```
+
+Retry dipakai untuk request exchange dan Telegram. Error alert cooldown mencegah spam jika error yang sama berulang.
+
+## Replay dan Testing
+
+Replay baseline:
+
+```bash
+npm run replay
+```
+
+Syntax check:
+
+```bash
+npm run check
+```
+
+Test:
+
+```bash
+npm test
+```
+
+Test saat ini mencakup paper liquidation, partial target/margin release, dan daily loss limit. Roadmap berikutnya memprioritaskan coverage lifecycle dan strategy filter yang lebih luas.
+
+## Deploy ke Railway
+
+Project sudah memiliki `railway.json`.
+
+Langkah umum:
+
+1. Push repo ke GitHub.
+2. Buat Railway project dari GitHub repo.
+3. Pastikan service memakai command `npm start`.
+4. Isi Variables berdasarkan `.env.example`.
+5. Gunakan PostgreSQL atau persistent volume untuk state production.
+6. Aktifkan `SINGLE_INSTANCE_LOCK_ENABLED=true`.
+7. Aktifkan `HEALTHCHECK_ENABLED=true` jika ingin endpoint health.
+8. Redeploy service.
+
+Minimal variables production:
 
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 EXCHANGE=bitget
 MARKET_TYPE=swap
-SYMBOLS=PEPE/USDT:USDT
+SYMBOLS=SUI/USDT:USDT,PEPE/USDT:USDT
 TIMEFRAME=15m
 CANDLE_LIMIT=1000
-CHECK_INTERVAL_SECONDS=60
+CHECK_INTERVAL_SECONDS=300
+DATABASE_URL=...
 ```
 
-Tidak perlu mengisi `PORT` karena bot ini Worker, bukan web server.
+## Rekomendasi Setting Awal
 
----
-
-## 14. Cara Kerja Anti-Spam Alert
-
-Bot menyimpan file `state.json` dengan isi seperti:
-
-```json
-{
-  "pairs": {
-    "bitget:PEPE/USDT:USDT:15m": {
-      "lastDirection": -1,
-      "lastSignalCandleTime": 1710000000000
-    }
-  }
-}
-```
-
-Tujuannya:
-
-- tidak mengirim sinyal yang sama berulang-ulang
-- tidak mengirim BUY lagi jika sinyal terakhir sudah BUY
-- tidak mengirim SELL lagi jika sinyal terakhir sudah SELL
-- sinyal baru akan muncul jika arah berubah
-
-Catatan: jika Railway redeploy dan filesystem reset, state bisa hilang. Untuk penggunaan serius, isi `DATABASE_URL` PostgreSQL atau gunakan Railway Volume agar state durable.
-
-### Storage production dengan PostgreSQL
-
-Secara default bot memakai file `STATE_FILE`.
-
-Jika `DATABASE_URL` diisi, bot akan memakai PostgreSQL dan otomatis membuat tabel `bot_state`:
-
-```env
-DATABASE_URL=postgresql://user:password@host:5432/database
-```
-
-Saat pertama kali memakai PostgreSQL, bot akan mencoba membaca state lama dari `STATE_FILE` lalu menyimpannya ke database.
-
----
-
-## 15. Command Telegram
-
-Bot dapat menerima command lewat long polling Telegram jika `TELEGRAM_COMMANDS_ENABLED=true`.
-
-Command yang tersedia:
-
-- `/start` - menampilkan bantuan awal.
-- `/help` - menampilkan daftar command.
-- `/status` - menampilkan status scanner, scan terakhir, dan error terakhir.
-- `/performance` - menampilkan performa all-time.
-- `/paper` - menampilkan ringkasan paper trading.
-- `/open` - menampilkan trade terbuka.
-- `/symbols` - menampilkan daftar symbol yang dipantau.
-- `/settings` - menampilkan setting utama.
-- `/pause` - pause scanner tanpa mematikan process.
-- `/resume` - melanjutkan scanner.
-- `/scanonce` - menjadwalkan scan manual sekali.
-
-Security command:
-
-```env
-TELEGRAM_ADMIN_IDS=123456789,987654321
-```
-
-Jika `TELEGRAM_ADMIN_IDS` kosong, hanya `TELEGRAM_CHAT_ID` yang diizinkan memakai command.
-
----
-
-## 16. Reliability Runtime
-
-Request ke exchange dan Telegram memakai retry sederhana.
-
-```env
-RETRY_ATTEMPTS=3
-RETRY_DELAY_MS=1000
-ERROR_ALERT_COOLDOWN_SECONDS=900
-```
-
-`ERROR_ALERT_COOLDOWN_SECONDS` mencegah Telegram spam jika error yang sama terjadi berulang.
-
-Observability optional:
-
-```env
-LOG_LEVEL=info
-HEALTHCHECK_ENABLED=false
-HEALTHCHECK_PORT=3000
-HEARTBEAT_ENABLED=false
-HEARTBEAT_INTERVAL_HOURS=24
-```
-
-Jika `HEALTHCHECK_ENABLED=true`, bot membuka endpoint `GET /health` berisi status scanner, last successful scan, dan error terakhir. Jika `HEARTBEAT_ENABLED=true`, bot mengirim heartbeat Telegram berkala.
-
----
-
-## 17. Tracking Winrate Mingguan dan Bulanan
-
-Bot menyimpan setiap sinyal Telegram sebagai trade terbuka di `state.json` atau PostgreSQL.
-
-Lifecycle trade dihitung seperti ini:
-
-- Status awal `OPEN`.
-- Saat harga menyentuh target, status berubah menjadi `TP1_HIT`, `TP2_HIT`, atau `TP3_HIT` dan bot mengirim update Telegram.
-- Saat harga menyentuh SL, status berubah menjadi `SL_HIT` dan trade ditutup.
-- Saat TP3 tersentuh, trade ditutup sebagai target final.
-- Jika dalam candle yang sama TP dan SL sama-sama tersentuh, bot menghitung SL secara konservatif karena data OHLC tidak menunjukkan urutan intrabar.
-- Report menampilkan winrate, TP3 hit, average R, average PnL, dan TP hit rate.
-
-Laporan winrate mingguan dikirim ke Telegram setiap Senin jam 08:00 WIB secara default. Laporan bulanan dikirim setiap tanggal 1 jam 08:00 WIB.
-
-```env
-WEEKLY_PERFORMANCE_REPORT_ENABLED=true
-MONTHLY_PERFORMANCE_REPORT_ENABLED=true
-PERFORMANCE_REPORT_TIMEZONE=Asia/Jakarta
-PERFORMANCE_REPORT_DAY=1
-PERFORMANCE_REPORT_HOUR=8
-MONTHLY_PERFORMANCE_REPORT_DAY=1
-MONTHLY_PERFORMANCE_REPORT_HOUR=8
-```
-
-`PERFORMANCE_REPORT_DAY` memakai format angka: `0` Minggu, `1` Senin, `2` Selasa, sampai `6` Sabtu.
-Laporan mingguan memakai 7 hari terakhir, sedangkan laporan bulanan memakai 30 hari terakhir dari waktu laporan dikirim.
-
----
-
-## 18. Paper Trading Mode
-
-Paper trading menyimpan salinan sinyal sebagai paper trade tanpa eksekusi order real. Outcome dihitung dari candle live berikutnya memakai lifecycle TP1/TP2/TP3/SL yang sama.
-
-```env
-PAPER_TRADING_ENABLED=false
-PAPER_TRADING_FEE_PERCENT=0
-PAPER_TRADING_SLIPPAGE_PERCENT=0
-```
-
-Gunakan `/paper` untuk melihat ringkasan paper trading. Jika `PAPER_TRADING_ENABLED=true`, bot juga mengirim weekly paper report mengikuti jadwal `PERFORMANCE_REPORT_DAY` dan `PERFORMANCE_REPORT_HOUR`.
-
----
-
-## 19. Strategy Profile, Override, HTF, dan Cooldown
-
-Bot mendukung profile bawaan `scalping`, `swing`, `meme`, dan `major`.
-
-```env
-STRATEGY_PROFILE=swing
-SIGNAL_COOLDOWN_SECONDS=3600
-```
-
-Override per symbol bisa memakai JSON dengan nama config camelCase sesuai internal config:
-
-```env
-SYMBOL_STRATEGY_OVERRIDES_JSON={"BTC/USDT:USDT":{"minConfirm":6,"minRR":2.5}}
-```
-
-Filter trend higher timeframe optional:
-
-```env
-HIGHER_TIMEFRAME=1h
-REQUIRE_HIGHER_TIMEFRAME_TREND=true
-```
-
-Jika aktif, BUY hanya lolos saat higher timeframe bullish, dan SELL hanya lolos saat higher timeframe bearish.
-
----
-
-## 20. Pengaturan yang Paling Penting
-
-### `SYMBOLS`
-
-Pair yang dipantau.
-
-```env
-SYMBOLS=PEPE/USDT:USDT,BTC/USDT:USDT
-```
-
-### `TIMEFRAME`
-
-Timeframe candle.
+Untuk evaluasi awal 15m:
 
 ```env
 TIMEFRAME=15m
-```
-
-### `CHECK_INTERVAL_SECONDS`
-
-Interval scan.
-
-```env
-CHECK_INTERVAL_SECONDS=60
-```
-
-Untuk timeframe 15m, scan tiap 60 detik cukup karena bot hanya memakai candle tertutup.
-
-### `SAFE_SL_LOOKBACK`
-
-Jumlah candle terakhir untuk mencari swing low/high sebagai area aman SL.
-
-```env
-SAFE_SL_LOOKBACK=20
-```
-
-### `SAFE_SL_BUFFER_ATR`
-
-Buffer ATR agar SL berada sedikit di luar area order block/swing.
-
-```env
-SAFE_SL_BUFFER_ATR=0.35
-```
-
-### `MAX_SAFE_SL_PERCENT`
-
-Batas maksimum jarak SL dari entry. Jika SL dinamis lebih jauh dari angka ini, sinyal ditolak.
-
-```env
-MAX_SAFE_SL_PERCENT=5.0
-```
-
-### `MIN_RR`
-
-Minimal RR ke TP3.
-
-```env
-MIN_RR=3.0
-```
-
-Jika ingin target profit lebih besar:
-
-```env
-MIN_RR=5.0
-```
-
-### `MIN_CONFIRM`
-
-Minimal konfirmasi indikator.
-
-```env
+CHECK_INTERVAL_SECONDS=300
 MIN_CONFIRM=5
-```
-
-Lebih ketat:
-
-```env
-MIN_CONFIRM=6
-```
-
----
-
-## 21. Rekomendasi Setting Koin
-
-Untuk pair crypto secara general di timeframe 15m:
-
-```env
-TIMEFRAME=15m
-CHECK_INTERVAL_SECONDS=60
+MIN_RR=3.0
 SAFE_SL_LOOKBACK=20
 SAFE_SL_BUFFER_ATR=0.35
 MAX_SAFE_SL_PERCENT=5.0
-MIN_RR=3.0
-MIN_CONFIRM=5
 LIQUIDITY_TOUCH_LOOKBACK=150
 LIQUIDITY_TOLERANCE_ATR=0.35
 MIN_LIQUIDITY_TOUCHES=2
 MAX_TARGET_ATR_DISTANCE=20.0
+PAPER_TRADING_ENABLED=true
+PAPER_TRADING_INITIAL_BALANCE=100
+PAPER_TRADING_POSITION_NOTIONAL=500
+PAPER_TRADING_LEVERAGE=75
+PAPER_TRADING_MIN_LIQUIDATION_BUFFER_PERCENT=0
 ```
 
-Jika sinyal terlalu sering:
+Jika sinyal terlalu sering dan banyak langsung SL:
 
 ```env
 MIN_CONFIRM=6
-MIN_LIQUIDITY_TOUCHES=3
+MIN_VOLUME_RATIO=1.2
+MIN_CANDLE_BODY_PERCENT=45
+MAX_ENTRY_WICK_PERCENT=35
+REJECT_FALLBACK_LIQUIDITY_TARGET=true
 ```
 
-Jika TP terlalu jauh:
+Jika leverage 75x terlalu sering dekat liquidation:
 
 ```env
-MAX_TARGET_ATR_DISTANCE=12.0
-MIN_RR=3.0
+PAPER_TRADING_MIN_LIQUIDATION_BUFFER_PERCENT=0.5
+PAPER_TRADING_MAX_LOSS_PERCENT_EQUITY=3
+PAPER_TRADING_DAILY_LOSS_LIMIT_USDT=5
+PAPER_TRADING_MAX_DRAWDOWN_PERCENT=15
 ```
 
-Jika TP terlalu dekat:
+## Troubleshooting
 
-```env
-MIN_RR=5.0
-LIQUIDITY_TOUCH_LOOKBACK=300
-```
+### Bot tidak kirim Telegram
 
----
+- Cek `TELEGRAM_BOT_TOKEN`.
+- Cek `TELEGRAM_CHAT_ID`.
+- Kirim `/start` ke bot.
+- Jika target group/channel, pastikan bot sudah masuk dan punya izin.
+- Cek Railway Variables dan redeploy.
 
-## 22. Contoh Output Telegram
+### Symbol tidak ditemukan
 
-```text
-🔴 SELL SIGNAL
-
-Pair: bitget:PEPE/USDT:USDT
-Timeframe: 15m
-Candle: 2026-05-18 10:15:00 UTC
-Trend: BEARISH
-
-Entry: 0.0000039505
-SL Safe Zone 3.1%: 0.000004073
-SL Source: order_block_swing_high
-
-TP1: 0.00000382
-TP2: 0.00000367
-TP3 Smart Liquidity: 0.00000355
-
-RR TP3: 5.07R
-Probability: 73%
-Score: 6/7
-
-Liquidity Source: smart_liquidity
-Liquidity Score: 92.4
-Liquidity Touches: 4
-Order Block Score: 76.5
-Order Block Zone: 0.00000401 - 0.00000406
-Order Block Age: 8 candles
-```
-
----
-
-## 23. Troubleshooting
-
-### Bot tidak mengirim Telegram
-
-Cek:
-
-- `TELEGRAM_BOT_TOKEN` benar
-- `TELEGRAM_CHAT_ID` benar
-- kamu sudah kirim `/start` ke bot
-- kalau target group/channel, bot sudah dimasukkan
-- kalau channel, bot sudah jadi admin
-- Railway variables sudah disimpan
-- service sudah redeploy
-
-### Error symbol tidak ditemukan
-
-Coba format symbol lain.
-
-Bitget perpetual umumnya:
-
-```env
-SYMBOLS=PEPE/USDT:USDT
-```
-
-Binance spot:
-
-```env
-SYMBOLS=PEPE/USDT
-```
-
-Binance USD-M futures:
-
-```env
-SYMBOLS=1000PEPE/USDT:USDT
-```
+- Cek format symbol sesuai exchange CCXT.
+- Spot biasanya `BTC/USDT`.
+- USDT perpetual sering memakai `BTC/USDT:USDT`.
+- Beberapa contract memakai prefix seperti `1000PEPE/USDT:USDT`.
 
 ### Tidak ada sinyal
 
-Kemungkinan:
+- Candle belum cukup untuk indikator.
+- Market tidak memenuhi confirmation.
+- `MIN_CONFIRM`, `MIN_RR`, atau order block terlalu ketat.
+- HTF/regime/funding/OI filter menolak sinyal.
+- Cek `/rejected` atau `/why SYMBOL`.
 
-- `MIN_CONFIRM` terlalu tinggi
-- `MIN_RR` terlalu tinggi
-- `MIN_LIQUIDITY_TOUCHES` terlalu tinggi
-- market sedang sideways
-- candle belum cukup
-- timeframe terlalu besar dan perlu menunggu candle close
+### Sinyal banyak kena SL
 
-### Alert terlalu sering
+- Naikkan `MIN_CONFIRM`.
+- Aktifkan filter body/wick/volume.
+- Aktifkan `REJECT_FALLBACK_LIQUIDITY_TARGET=true`.
+- Gunakan `breakout_retest` atau `pullback_trend` untuk menghindari entry chasing.
+- Evaluasi lewat paper trading, bukan dari beberapa alert saja.
 
-Naikkan:
+### Paper trade ditolak
 
-```env
-MIN_CONFIRM=6
-MIN_LIQUIDITY_TOUCHES=3
-MIN_RR=5
-```
+- Cek `/risk` dan `/rejected`.
+- Kemungkinan saldo margin tidak cukup.
+- Liquidation terlalu dekat dengan SL.
+- Daily loss atau drawdown limit tercapai.
+- Max notional atau max used margin tercapai.
 
-### Bot crash di Railway
+## Roadmap
 
-Cek log Railway. Pastikan semua variable wajib sudah diisi.
+Roadmap terbaru ada di `ROADMAP.md`.
 
----
+Prioritas berikutnya:
 
-## 24. Catatan Data dan Akurasi
+1. Validation dan test coverage.
+2. Exchange-specific futures accuracy.
+3. Research data warehouse.
+4. Strategy lab dan walk-forward.
+5. Advanced signal quality.
+6. Portfolio risk dan capital allocation.
+7. Dashboard v2.
+8. Telegram UX lanjutan.
+9. Production operations.
+10. Real execution readiness gate.
 
-Hasil indikator bisa sedikit berbeda dari TradingView karena:
+## Catatan Akurasi
 
-- sumber data exchange bisa berbeda
-- candle futures/spot berbeda
-- perhitungan indicator internal TradingView bisa sedikit berbeda
-- bot hanya memakai candle tertutup
-- liquidity yang dihitung adalah proxy teknikal, bukan order book/liquidation heatmap asli
+Hasil bot bisa berbeda dari TradingView karena:
 
-Bot ini tidak menjamin profit. Gunakan sebagai alat bantu monitoring.
+- sumber data exchange berbeda.
+- spot dan futures memiliki candle berbeda.
+- implementasi indikator bisa berbeda.
+- bot memakai candle tertutup.
+- liquidity/order block adalah proxy teknikal, bukan order book atau liquidation heatmap asli.
+- funding/OI/long-short ratio tergantung dukungan exchange.
 
----
+Bot tidak menjamin profit. Gunakan sebagai alat bantu monitoring, riset, dan evaluasi paper trading.
 
-## 25. License
-
-Project ini memakai MIT License. Kamu boleh memakai, memodifikasi, dan mengembangkan project ini, termasuk untuk penggunaan komersial, selama tetap menyertakan notice license.
-
-Lihat file `LICENSE`.
-
----
-
-## 26. Disclaimer
-
-Bot ini bukan nasihat finansial. Semua keputusan trading tetap tanggung jawab pengguna. Crypto sangat volatil dan bisa menyebabkan kerugian besar.
-
----
-
-## 27. Referensi Teknis
+## Referensi
 
 - CCXT Documentation: https://docs.ccxt.com/
-- CCXT GitHub README: https://github.com/ccxt/ccxt
+- CCXT GitHub: https://github.com/ccxt/ccxt
 - Telegram Bot API: https://core.telegram.org/bots/api
-- Railway Variables: https://docs.railway.com/variables
-- Binance Kline/Candlestick Data: https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Kline-Candlestick-Data
+- Railway Docs: https://docs.railway.com/
+- Binance USD-M Kline Data: https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Kline-Candlestick-Data
+
+## License
+
+MIT License. Lihat `LICENSE`.
+
+## Disclaimer
+
+Bot ini bukan nasihat finansial. Semua keputusan trading tetap tanggung jawab pengguna. Crypto sangat volatil dan bisa menyebabkan kerugian besar.
