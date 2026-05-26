@@ -17,6 +17,7 @@ export const config = {
     viewerIds: parseCsv(process.env.TELEGRAM_VIEWER_IDS || "", []),
     sendStartupMessage: toBoolean(process.env.SEND_STARTUP_MESSAGE, true),
     alertErrors: toBoolean(process.env.ALERT_ERRORS, false),
+    syncCommands: toBoolean(process.env.TELEGRAM_SYNC_COMMANDS, true),
     commandsEnabled: toBoolean(process.env.TELEGRAM_COMMANDS_ENABLED, true),
     commandPollTimeoutSeconds: toNumber(process.env.TELEGRAM_COMMAND_POLL_TIMEOUT_SECONDS, 25, { min: 1, max: 50 })
   },

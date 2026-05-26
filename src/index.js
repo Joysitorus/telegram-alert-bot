@@ -1,5 +1,5 @@
 import ccxt from "ccxt";
-import { runCommandLoop } from "./commands.js";
+import { runCommandLoop, syncTelegramCommands } from "./commands.js";
 import { config, getConfigHash, getStrategyConfigForSymbol, validateConfig } from "./config.js";
 import { startHealthServer } from "./health.js";
 import { createLogger, ErrorThrottler, withRetry } from "./reliability.js";
@@ -359,6 +359,17 @@ async function notify(text, chatId = config.telegram.chatId, replyMarkup = null)
   );
 }
 
+async function syncTelegramCommandsIfEnabled() {
+  if (!config.telegram.syncCommands) return;
+
+  try {
+    await syncTelegramCommands(config.telegram.botToken);
+    logger.info("telegram commands synced");
+  } catch (error) {
+    logger.warn("telegram commands sync failed", { error: error.message });
+  }
+}
+
 async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const key = `${config.exchange.id}:${symbol}:${config.exchange.timeframe}`;
   const pairState = getPairState(state, key);
@@ -689,6 +700,8 @@ async function main() {
     intervalSeconds: config.exchange.checkIntervalSeconds,
     storage: stateStore.type
   });
+
+  await syncTelegramCommandsIfEnabled();
 
   const commandLoop = runCommandLoop({
     state,

@@ -2,6 +2,41 @@ import axios from "axios";
 import { getLessonSummary, getPaperAccountState, getPerformanceState, getRuntimeState } from "./state.js";
 import { escapeHtml, formatDateTime, formatNumber } from "./utils.js";
 
+export const telegramCommandDefinitions = [
+  { command: "start", description: "bantuan awal" },
+  { command: "help", description: "bantuan command" },
+  { command: "status", description: "status scanner" },
+  { command: "performance", description: "performa all-time" },
+  { command: "paper", description: "ringkasan paper trading" },
+  { command: "risk", description: "ringkasan risk paper trading" },
+  { command: "lesson", description: "ringkasan pembelajaran sinyal" },
+  { command: "equity", description: "saldo dan PnL paper trading" },
+  { command: "drawdown", description: "drawdown paper trading" },
+  { command: "rejected", description: "alasan sinyal ditolak" },
+  { command: "lastsignal", description: "decision terakhir symbol" },
+  { command: "why", description: "alasan terakhir symbol" },
+  { command: "backup", description: "ringkasan backup state" },
+  { command: "open", description: "trade terbuka" },
+  { command: "symbols", description: "daftar symbol" },
+  { command: "settings", description: "setting bot" },
+  { command: "pause", description: "pause scanner" },
+  { command: "resume", description: "lanjut scanner" },
+  { command: "scanonce", description: "scan manual sekali" },
+  { command: "setpaper", description: "override paper trading" },
+  { command: "setpaused", description: "pause atau resume symbol" }
+];
+
+export async function syncTelegramCommands(botToken) {
+  if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN belum diisi.");
+
+  const url = `https://api.telegram.org/bot${botToken}/setMyCommands`;
+  await axios.post(url, {
+    commands: telegramCommandDefinitions
+  }, {
+    timeout: 15000
+  });
+}
+
 function parseCommand(text) {
   const firstToken = String(text || "").trim().split(/\s+/)[0] || "";
   const command = firstToken.split("@")[0].toLowerCase();

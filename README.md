@@ -136,9 +136,12 @@ https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates
 Command polling aktif secara default:
 
 ```env
+TELEGRAM_SYNC_COMMANDS=true
 TELEGRAM_COMMANDS_ENABLED=true
 TELEGRAM_COMMAND_POLL_TIMEOUT_SECONDS=25
 ```
+
+`TELEGRAM_SYNC_COMMANDS=true` mendaftarkan menu command Telegram via `setMyCommands` saat startup. Ini hanya memperbarui daftar command yang muncul saat mengetik `/`; pemrosesan command tetap dikontrol oleh `TELEGRAM_COMMANDS_ENABLED`.
 
 Role command:
 
