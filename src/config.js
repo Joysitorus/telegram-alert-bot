@@ -83,6 +83,16 @@ export const config = {
     tradeExpiryCandles: toNumber(process.env.TRADE_EXPIRY_CANDLES, 0, { min: 0, max: 100000 })
   },
 
+  lesson: {
+    enabled: toBoolean(process.env.LESSON_ENABLED, true),
+    applyFilter: toBoolean(process.env.LESSON_APPLY_FILTER, true),
+    minSamples: toNumber(process.env.LESSON_MIN_SAMPLES, 8, { min: 1, max: 1000 }),
+    minWinRate: toNumber(process.env.LESSON_MIN_WIN_RATE, 35, { min: 0, max: 100 }),
+    minAvgR: toNumber(process.env.LESSON_MIN_AVG_R, 0, { min: -100, max: 100 }),
+    maxLosingStreak: toNumber(process.env.LESSON_MAX_LOSING_STREAK, 4, { min: 0, max: 100 }),
+    maxRecords: toNumber(process.env.LESSON_MAX_RECORDS, 2000, { min: 100, max: 100000 })
+  },
+
   strategy: {
     emaFast: toNumber(process.env.EMA_FAST, 20, { min: 1, max: 500 }),
     emaMid: toNumber(process.env.EMA_MID, 50, { min: 1, max: 500 }),

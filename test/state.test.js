@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import {
   addPaperTrade,
   createDefaultState,
+  evaluateLessonForSignal,
   getPaperAccountState,
+  getLessonSummary,
+  recordLessonsFromClosedTrades,
   updatePaperTradeOutcomes
 } from "../src/state.js";
 
@@ -81,4 +84,50 @@ test("daily loss limit rejects new paper trades", () => {
   const result = addPaperTrade(state, key, signal({ sl: 92 }), config);
   assert.equal(result.added, false);
   assert.equal(result.reason, "daily_loss_limit");
+});
+
+test("lesson records closed trades and rejects weak repeated setup", () => {
+  const state = createDefaultState();
+  const closedTrades = Array.from({ length: 3 }, (_, index) => ({
+    ...signal({
+      candleTime: index,
+      direction: "BUY",
+      directionValue: 1,
+      entryMode: "breakout_close",
+      rr: 2,
+      slRiskPercent: 2,
+      marketRegime: { trendRegime: "trending", volatilityRegime: "low_volatility", labels: ["trending", "low_volatility"] }
+    }),
+    id: `trade:x:BTC/USDT:USDT:15m:${index}:BUY`,
+    strategyVersion: "test",
+    outcome: "SL",
+    realizedR: -1,
+    pnlPercent: -2,
+    openedAt: index,
+    closedAt: index + 1,
+    openCandleCount: 1
+  }));
+
+  const recordResult = recordLessonsFromClosedTrades(state, closedTrades, { source: "signal" });
+  assert.equal(recordResult.added, 3);
+  assert.equal(getLessonSummary(state).totalLessons, 3);
+
+  const evaluation = evaluateLessonForSignal(state, {
+    ...signal({
+      entryMode: "breakout_close",
+      rr: 2,
+      slRiskPercent: 2,
+      marketRegime: { trendRegime: "trending", volatilityRegime: "low_volatility", labels: ["trending", "low_volatility"] }
+    })
+  }, {
+    enabled: true,
+    applyFilter: true,
+    minSamples: 3,
+    minWinRate: 35,
+    minAvgR: 0,
+    maxLosingStreak: 3
+  });
+
+  assert.equal(evaluation.passes, false);
+  assert.equal(evaluation.reason, "lesson_losing_streak");
 });

@@ -4,6 +4,11 @@ import { createDefaultState, loadState, normalizeState, saveState } from "./stat
 
 const stateRowId = "default";
 
+function finiteNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 class FileStateStore {
   constructor(stateFile) {
     this.type = "file";
@@ -58,6 +63,8 @@ class PostgresStateStore {
     this.databaseUrl = databaseUrl;
     this.client = null;
     this.ready = false;
+    this.syncedLessonIds = new Set();
+    this.syncedLessonStats = new Map();
   }
 
   async init() {
@@ -73,6 +80,37 @@ class PostgresStateStore {
     await this.client.query(`
       CREATE TABLE IF NOT EXISTS bot_state (
         id text PRIMARY KEY,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS bot_lessons (
+        id text PRIMARY KEY,
+        source text,
+        symbol text,
+        timeframe text,
+        direction text,
+        outcome text,
+        success boolean,
+        realized_r double precision,
+        opened_at bigint,
+        closed_at bigint,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS bot_lesson_stats (
+        id text PRIMARY KEY,
+        scope text,
+        key text,
+        samples integer,
+        wins integer,
+        losses integer,
+        win_rate double precision,
+        avg_r double precision,
+        current_losing_streak integer,
         data jsonb NOT NULL,
         updated_at timestamptz NOT NULL DEFAULT now()
       )
@@ -96,13 +134,93 @@ class PostgresStateStore {
 
   async save(state) {
     await this.init();
+    const normalizedState = normalizeState(state);
     await this.client.query(
       `INSERT INTO bot_state (id, data, updated_at)
        VALUES ($1, $2, now())
        ON CONFLICT (id)
        DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-      [stateRowId, normalizeState(state)]
+      [stateRowId, normalizedState]
     );
+    await this.saveLessons(normalizedState);
+  }
+
+  async saveLessons(state) {
+    const lessons = state.research?.lessons || [];
+    const stats = Object.entries(state.research?.lessonStats || {});
+
+    for (const lesson of lessons) {
+      if (this.syncedLessonIds.has(lesson.id)) continue;
+      await this.client.query(
+        `INSERT INTO bot_lessons (
+          id, source, symbol, timeframe, direction, outcome, success, realized_r, opened_at, closed_at, data, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          source = EXCLUDED.source,
+          symbol = EXCLUDED.symbol,
+          timeframe = EXCLUDED.timeframe,
+          direction = EXCLUDED.direction,
+          outcome = EXCLUDED.outcome,
+          success = EXCLUDED.success,
+          realized_r = EXCLUDED.realized_r,
+          opened_at = EXCLUDED.opened_at,
+          closed_at = EXCLUDED.closed_at,
+          data = EXCLUDED.data,
+          updated_at = now()`,
+        [
+          lesson.id,
+          lesson.source || null,
+          lesson.symbol || null,
+          lesson.timeframe || null,
+          lesson.direction || null,
+          lesson.outcome || null,
+          Boolean(lesson.success),
+          Number(lesson.realizedR) || 0,
+          finiteNumberOrNull(lesson.openedAt),
+          finiteNumberOrNull(lesson.closedAt),
+          lesson
+        ]
+      );
+      this.syncedLessonIds.add(lesson.id);
+    }
+
+    for (const [id, stat] of stats) {
+      const fingerprint = JSON.stringify(stat);
+      if (this.syncedLessonStats.get(id) === fingerprint) continue;
+      await this.client.query(
+        `INSERT INTO bot_lesson_stats (
+          id, scope, key, samples, wins, losses, win_rate, avg_r, current_losing_streak, data, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          scope = EXCLUDED.scope,
+          key = EXCLUDED.key,
+          samples = EXCLUDED.samples,
+          wins = EXCLUDED.wins,
+          losses = EXCLUDED.losses,
+          win_rate = EXCLUDED.win_rate,
+          avg_r = EXCLUDED.avg_r,
+          current_losing_streak = EXCLUDED.current_losing_streak,
+          data = EXCLUDED.data,
+          updated_at = now()`,
+        [
+          id,
+          stat.scope || null,
+          stat.key || null,
+          Number(stat.samples) || 0,
+          Number(stat.wins) || 0,
+          Number(stat.losses) || 0,
+          Number(stat.winRate) || 0,
+          Number(stat.avgR) || 0,
+          Number(stat.currentLosingStreak) || 0,
+          stat
+        ]
+      );
+      this.syncedLessonStats.set(id, fingerprint);
+    }
   }
 
   async close() {

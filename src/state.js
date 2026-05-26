@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-export const CURRENT_STATE_SCHEMA_VERSION = 2;
+export const CURRENT_STATE_SCHEMA_VERSION = 3;
 
 function createDefaultPerformanceState() {
   return {
@@ -40,7 +40,9 @@ export function createDefaultState() {
     pairs: {},
     research: {
       signalDecisions: [],
-      marketSnapshots: []
+      marketSnapshots: [],
+      lessons: [],
+      lessonStats: {}
     },
     performance: createDefaultPerformanceState(),
     runtime: {
@@ -100,6 +102,8 @@ export function normalizeState(state) {
   if (!normalized.research) normalized.research = {};
   if (!Array.isArray(normalized.research.signalDecisions)) normalized.research.signalDecisions = [];
   if (!Array.isArray(normalized.research.marketSnapshots)) normalized.research.marketSnapshots = [];
+  if (!Array.isArray(normalized.research.lessons)) normalized.research.lessons = [];
+  if (!normalized.research.lessonStats || typeof normalized.research.lessonStats !== "object") normalized.research.lessonStats = {};
   if (!normalized.performance) normalized.performance = createDefaultPerformanceState();
   if (!normalized.performance.openTrades) normalized.performance.openTrades = [];
   if (!normalized.performance.closedTrades) normalized.performance.closedTrades = [];
@@ -147,9 +151,17 @@ function buildTradeFromSignal(key, signal, prefix = "trade") {
     tp3ExitPortion: signal.tp3ExitPortion ?? 0.34,
     openedAt: signal.candleTime,
     lastCheckedCandleTime: signal.candleTime,
+    entryMode: signal.entryMode || null,
+    rr: signal.rr,
+    slRiskPercent: signal.slRiskPercent,
+    liquiditySource: signal.liquiditySource || null,
+    liquidityScore: signal.liquidityScore,
+    liquidityTouches: signal.liquidityTouches,
+    orderBlockScore: signal.orderBlockScore,
+    marketRegime: signal.marketRegime || null,
+    trend: signal.trend || null,
     score: signal.score,
     probability: signal.probability,
-    orderBlockScore: signal.orderBlockScore,
     status: "OPEN",
     tp1Hit: false,
     tp2Hit: false,
@@ -723,7 +735,7 @@ export function updateTradeOutcomes(state, key, candles, options = {}) {
   const result = updateTradeList(performance.openTrades, key, candles, options);
   performance.openTrades = result.remainingTrades;
   performance.closedTrades.push(...result.closedTrades);
-  return { changed: result.changed, events: result.events };
+  return { changed: result.changed, events: result.events, closedTrades: result.closedTrades };
 }
 
 export function updatePaperTradeOutcomes(state, key, candles, options = {}) {
@@ -736,7 +748,7 @@ export function updatePaperTradeOutcomes(state, key, candles, options = {}) {
   const result = updateTradeList(performance.paperTrades, key, candles, { ...options, paperAccount });
   delete paperAccount.exitRules;
   performance.paperTrades = [...result.remainingTrades, ...result.closedTrades];
-  return { changed: result.changed, events: result.events.map((event) => ({ ...event, paper: true })) };
+  return { changed: result.changed, events: result.events.map((event) => ({ ...event, paper: true })), closedTrades: result.closedTrades };
 }
 
 function optionsBreakEvenEnabled(paperAccount) {
@@ -767,4 +779,247 @@ export function recordMarketSnapshot(state, snapshot, limit = 2000) {
   if (normalized.research.marketSnapshots.length > limit) {
     normalized.research.marketSnapshots = normalized.research.marketSnapshots.slice(-limit);
   }
+}
+
+function getMarketRegimeLabels(value) {
+  const labels = Array.isArray(value?.labels) ? value.labels : [];
+  const trendRegime = value?.trendRegime || labels.find((item) => item === "trending" || item === "ranging") || "unknown_trend";
+  const volatilityRegime = value?.volatilityRegime || labels.find((item) => item === "high_volatility" || item === "low_volatility") || "unknown_volatility";
+  return { trendRegime, volatilityRegime };
+}
+
+function bucketNumber(value, buckets, fallback = "unknown") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  for (const bucket of buckets) {
+    if (number <= bucket.max) return bucket.label;
+  }
+  return buckets.at(-1)?.label || fallback;
+}
+
+function getLessonFeatures(input) {
+  const { trendRegime, volatilityRegime } = getMarketRegimeLabels(input.marketRegime);
+  return {
+    symbol: input.symbol || "unknown_symbol",
+    timeframe: input.timeframe || "unknown_timeframe",
+    direction: input.direction || "unknown_direction",
+    entryMode: input.entryMode || "unknown_entry",
+    trendRegime,
+    volatilityRegime,
+    liquiditySource: input.liquiditySource || "unknown_liquidity",
+    scoreBucket: bucketNumber(input.score, [
+      { max: 4, label: "score_lte_4" },
+      { max: 5, label: "score_5" },
+      { max: 6, label: "score_6" },
+      { max: Infinity, label: "score_7_plus" }
+    ]),
+    rrBucket: bucketNumber(input.rr, [
+      { max: 1.99, label: "rr_lt_2" },
+      { max: 2.99, label: "rr_2_3" },
+      { max: 4.99, label: "rr_3_5" },
+      { max: Infinity, label: "rr_5_plus" }
+    ]),
+    slRiskBucket: bucketNumber(input.slRiskPercent, [
+      { max: 1, label: "sl_lte_1" },
+      { max: 2, label: "sl_1_2" },
+      { max: 3, label: "sl_2_3" },
+      { max: 5, label: "sl_3_5" },
+      { max: Infinity, label: "sl_gt_5" }
+    ]),
+    orderBlockBucket: bucketNumber(input.orderBlockScore, [
+      { max: 59.999, label: "ob_weak" },
+      { max: 79.999, label: "ob_ok" },
+      { max: Infinity, label: "ob_strong" }
+    ])
+  };
+}
+
+function getLessonStatKeys(features) {
+  return [
+    {
+      scope: "exact_setup",
+      key: [
+        features.symbol,
+        features.timeframe,
+        features.direction,
+        features.entryMode,
+        features.trendRegime,
+        features.volatilityRegime,
+        features.scoreBucket
+      ].join("|")
+    },
+    {
+      scope: "symbol_side",
+      key: [features.symbol, features.timeframe, features.direction].join("|")
+    },
+    {
+      scope: "entry_regime",
+      key: [features.direction, features.entryMode, features.trendRegime, features.volatilityRegime].join("|")
+    },
+    {
+      scope: "liquidity_source",
+      key: [features.direction, features.liquiditySource].join("|")
+    }
+  ];
+}
+
+function createLessonStat(scope, key, features) {
+  return {
+    scope,
+    key,
+    features,
+    samples: 0,
+    wins: 0,
+    losses: 0,
+    totalR: 0,
+    avgR: 0,
+    winRate: 0,
+    bestR: null,
+    worstR: null,
+    currentLosingStreak: 0,
+    maxLosingStreak: 0,
+    lastOutcome: null,
+    lastUpdatedAt: null
+  };
+}
+
+function updateLessonStat(stat, lesson) {
+  const r = Number(lesson.realizedR) || 0;
+  stat.samples += 1;
+  stat.wins += lesson.success ? 1 : 0;
+  stat.losses += lesson.success ? 0 : 1;
+  stat.totalR += r;
+  stat.avgR = stat.samples > 0 ? stat.totalR / stat.samples : 0;
+  stat.winRate = stat.samples > 0 ? stat.wins / stat.samples * 100 : 0;
+  stat.bestR = stat.bestR === null ? r : Math.max(stat.bestR, r);
+  stat.worstR = stat.worstR === null ? r : Math.min(stat.worstR, r);
+  stat.currentLosingStreak = lesson.success ? 0 : stat.currentLosingStreak + 1;
+  stat.maxLosingStreak = Math.max(stat.maxLosingStreak, stat.currentLosingStreak);
+  stat.lastOutcome = lesson.outcome;
+  stat.lastUpdatedAt = lesson.at;
+}
+
+export function recordLessonsFromClosedTrades(state, trades, options = {}) {
+  const normalized = normalizeState(state);
+  const source = options.source || "signal";
+  const limit = Number(options.limit) || 2000;
+  const added = [];
+
+  for (const trade of Array.isArray(trades) ? trades : []) {
+    if (!trade?.id || !trade.outcome) continue;
+
+    const id = `${source}:${trade.id}`;
+    const exists = normalized.research.lessons.some((lesson) => lesson.id === id);
+    if (exists) continue;
+
+    const realizedR = Number(trade.realizedR) || 0;
+    const success = trade.outcome === "TP3" || trade.tp2Hit || realizedR > 0;
+    const features = getLessonFeatures(trade);
+    const lesson = {
+      id,
+      source,
+      at: Date.now(),
+      tradeId: trade.id,
+      configHash: trade.configHash || null,
+      strategyVersion: trade.strategyVersion || null,
+      symbol: trade.symbol,
+      timeframe: trade.timeframe,
+      direction: trade.direction,
+      outcome: trade.outcome,
+      success,
+      realizedR,
+      pnlPercent: Number(trade.pnlPercent) || Number(trade.realizedPnlPercent) || 0,
+      openedAt: trade.openedAt,
+      closedAt: trade.closedAt,
+      openCandleCount: Number(trade.openCandleCount) || 0,
+      features
+    };
+
+    normalized.research.lessons.push(lesson);
+    for (const item of getLessonStatKeys(features)) {
+      const statId = `${item.scope}:${item.key}`;
+      if (!normalized.research.lessonStats[statId]) {
+        normalized.research.lessonStats[statId] = createLessonStat(item.scope, item.key, features);
+      }
+      updateLessonStat(normalized.research.lessonStats[statId], lesson);
+    }
+    added.push(lesson);
+  }
+
+  if (normalized.research.lessons.length > limit) {
+    normalized.research.lessons = normalized.research.lessons.slice(-limit);
+  }
+
+  return { added: added.length, lessons: added };
+}
+
+function getLessonRejection(stat, lessonConfig) {
+  const minSamples = Number(lessonConfig.minSamples) || 0;
+  if (!stat || stat.samples < minSamples) return null;
+
+  const minWinRate = Number(lessonConfig.minWinRate) || 0;
+  const minAvgR = Number(lessonConfig.minAvgR) || 0;
+  const maxLosingStreak = Number(lessonConfig.maxLosingStreak) || 0;
+
+  if (maxLosingStreak > 0 && stat.currentLosingStreak >= maxLosingStreak) {
+    return "lesson_losing_streak";
+  }
+
+  if (stat.winRate < minWinRate) {
+    return "lesson_low_winrate";
+  }
+
+  if (stat.avgR < minAvgR) {
+    return "lesson_negative_avg_r";
+  }
+
+  return null;
+}
+
+export function evaluateLessonForSignal(state, signal, lessonConfig = {}) {
+  const normalized = normalizeState(state);
+  if (!lessonConfig.enabled || !lessonConfig.applyFilter) {
+    return { passes: true, reason: null, matched: null };
+  }
+
+  const features = getLessonFeatures(signal);
+  for (const item of getLessonStatKeys(features)) {
+    const statId = `${item.scope}:${item.key}`;
+    const stat = normalized.research.lessonStats[statId];
+    const reason = getLessonRejection(stat, lessonConfig);
+    if (reason) {
+      return {
+        passes: false,
+        reason,
+        matched: {
+          scope: stat.scope,
+          key: stat.key,
+          samples: stat.samples,
+          winRate: stat.winRate,
+          avgR: stat.avgR,
+          currentLosingStreak: stat.currentLosingStreak
+        }
+      };
+    }
+  }
+
+  return { passes: true, reason: null, matched: null };
+}
+
+export function getLessonSummary(state, limit = 10) {
+  const normalized = normalizeState(state);
+  const stats = Object.values(normalized.research.lessonStats || {})
+    .sort((a, b) => (b.samples - a.samples) || (a.avgR - b.avgR));
+
+  return {
+    totalLessons: normalized.research.lessons.length,
+    recentLessons: normalized.research.lessons.slice(-limit).reverse(),
+    weakestStats: stats
+      .filter((stat) => stat.samples > 0)
+      .slice(0, limit),
+    strongestStats: [...stats]
+      .filter((stat) => stat.samples > 0)
+      .sort((a, b) => (b.avgR - a.avgR) || (b.samples - a.samples))
+      .slice(0, limit)
+  };
 }

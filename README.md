@@ -157,6 +157,7 @@ Jika `TELEGRAM_ADMIN_IDS` kosong, hanya `TELEGRAM_CHAT_ID` yang boleh memakai co
 - `/performance` - performa all-time.
 - `/paper` - ringkasan paper trading.
 - `/risk` - exposure, margin, daily PnL, liquidation, dan kill switch.
+- `/lesson` - ringkasan pembelajaran hasil sinyal dan setup yang sedang lemah/kuat.
 - `/equity` - alias ringkasan saldo paper.
 - `/drawdown` - drawdown paper account.
 - `/rejected` - alasan sinyal atau paper trade ditolak.
@@ -419,6 +420,24 @@ TP2_EXIT_PORTION=0.33
 `PERFORMANCE_REPORT_DAY` memakai `0` untuk Minggu sampai `6` untuk Sabtu.
 
 Metrics yang dilacak meliputi winrate, TP hit rate, average R, average PnL, paper balance, drawdown, rejected trade, liquidation, dan open exposure.
+
+## Lesson Learning
+
+Lesson learning mencatat hasil setiap sinyal yang sudah selesai sebagai lesson. Data yang disimpan meliputi symbol, arah, entry mode, market regime, score bucket, RR bucket, SL risk bucket, outcome, realized R, dan durasi trade. Jika `DATABASE_URL` aktif di Railway, lesson ikut tersimpan di `bot_state` dan juga disinkronkan ke tabel `bot_lessons` serta `bot_lesson_stats`.
+
+```env
+LESSON_ENABLED=true
+LESSON_APPLY_FILTER=true
+LESSON_MIN_SAMPLES=8
+LESSON_MIN_WIN_RATE=35
+LESSON_MIN_AVG_R=0
+LESSON_MAX_LOSING_STREAK=4
+LESSON_MAX_RECORDS=2000
+```
+
+Jika filter aktif, sinyal baru akan ditolak saat setup historis yang mirip sudah punya minimal `LESSON_MIN_SAMPLES` dan performanya buruk, misalnya winrate di bawah `LESSON_MIN_WIN_RATE`, average R di bawah `LESSON_MIN_AVG_R`, atau losing streak mencapai `LESSON_MAX_LOSING_STREAK`.
+
+Gunakan `/lesson` untuk melihat ringkasan weak setup, strong setup, dan lesson terbaru.
 
 ## Storage dan State
 

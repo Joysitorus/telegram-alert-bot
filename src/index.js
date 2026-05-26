@@ -6,11 +6,13 @@ import { createLogger, ErrorThrottler, withRetry } from "./reliability.js";
 import { analyzeSymbol } from "./strategy.js";
 import {
   addPaperTrade,
+  evaluateLessonForSignal,
   getPairState,
   getPaperAccountState,
   getPerformanceState,
   getRuntimeState,
   recordMarketSnapshot,
+  recordLessonsFromClosedTrades,
   recordSignalDecision,
   updatePairState,
   updatePaperTradeOutcomes,
@@ -384,11 +386,17 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const paperOutcome = paperEnabled
     ? updatePaperTradeOutcomes(state, key, candles, { ...lifecycleOptions, paperConfig: config.paper })
     : { changed: false, events: [] };
+  const lessonResult = config.lesson.enabled
+    ? recordLessonsFromClosedTrades(state, outcome.closedTrades, {
+      source: "signal",
+      limit: config.lesson.maxRecords
+    })
+    : { added: 0 };
 
   if (outcome.events.length > 0) await notifyTradeEvents(outcome.events);
   if (paperOutcome.events.length > 0) await notifyTradeEvents(paperOutcome.events);
 
-  if (outcome.changed || paperOutcome.changed) {
+  if (outcome.changed || paperOutcome.changed || lessonResult.added > 0) {
     await stateStore.save(state);
   }
 
@@ -422,6 +430,20 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
         rejectedByMarketDataFilter: true,
         marketDataFilterReason: marketDataFilter.reason,
         marketDataFilters: marketDataFilter.metrics
+      };
+    }
+  }
+
+  if (analysis.hasSignal) {
+    const lessonFilter = evaluateLessonForSignal(state, analysis.signal, config.lesson);
+    analysis.signal.lessonFilter = lessonFilter.matched;
+    if (!lessonFilter.passes) {
+      analysis.hasSignal = false;
+      analysis.debug = {
+        ...analysis.debug,
+        rejectedByLesson: true,
+        lessonRejectReason: lessonFilter.reason,
+        lessonMatched: lessonFilter.matched
       };
     }
   }
@@ -509,6 +531,7 @@ function getRejectedReason(debug) {
   if (debug.inCooldown) return "cooldown";
   if (debug.rejectedByHigherTimeframe) return "higher_timeframe";
   if (debug.rejectedByMarketDataFilter) return debug.marketDataFilterReason || "market_data_filter";
+  if (debug.rejectedByLesson) return debug.lessonRejectReason || "lesson_filter";
   if (!debug.marketRegimeAllowed) return "market_regime";
   if (debug.buyQuality?.rejectionReasons?.length || debug.sellQuality?.rejectionReasons?.length) {
     return [...(debug.buyQuality?.rejectionReasons || []), ...(debug.sellQuality?.rejectionReasons || [])].join(",");

@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getPaperAccountState, getPerformanceState, getRuntimeState } from "./state.js";
+import { getLessonSummary, getPaperAccountState, getPerformanceState, getRuntimeState } from "./state.js";
 import { escapeHtml, formatDateTime, formatNumber } from "./utils.js";
 
 function parseCommand(text) {
@@ -91,6 +91,7 @@ function buildHelpMessage() {
 /performance - ringkasan performa all-time
 /paper - ringkasan paper trading
 /risk - ringkasan risk paper trading
+/lesson - ringkasan pembelajaran sinyal
 /equity - saldo dan PnL paper trading
 /drawdown - drawdown paper trading
 /rejected - alasan sinyal/trade ditolak
@@ -243,6 +244,43 @@ ${rows.length ? rows.join("\n") : "Belum ada rejected decision tersimpan."}
 `.trim();
 }
 
+function formatLessonStat(stat) {
+  return `${escapeHtml(stat.scope)} ${escapeHtml(stat.key)} ` +
+    `n=${escapeHtml(String(stat.samples))} ` +
+    `win=${escapeHtml(formatNumber(stat.winRate, 1))}% ` +
+    `avgR=${escapeHtml(formatNumber(stat.avgR, 2))} ` +
+    `streak=${escapeHtml(String(stat.currentLosingStreak))}`;
+}
+
+function buildLessonMessage(state, config) {
+  const summary = getLessonSummary(state, 8);
+  const recentRows = summary.recentLessons.map((lesson) => (
+    `${escapeHtml(lesson.symbol)} ${escapeHtml(lesson.direction)} ${escapeHtml(lesson.outcome)} ` +
+    `${lesson.success ? "OK" : "FAIL"} R=${escapeHtml(formatNumber(lesson.realizedR, 2))} ` +
+    `${escapeHtml(formatDateTime(lesson.closedAt))}`
+  ));
+  const weakRows = summary.weakestStats.map(formatLessonStat);
+  const strongRows = summary.strongestStats.map(formatLessonStat);
+
+  return `
+<b>Lesson</b>
+
+<b>Enabled:</b> ${config.lesson.enabled ? "YES" : "NO"}
+<b>Filter:</b> ${config.lesson.applyFilter ? "ON" : "OFF"}
+<b>Total Lessons:</b> ${escapeHtml(String(summary.totalLessons))}
+<b>Reject Rule:</b> min ${escapeHtml(String(config.lesson.minSamples))} samples, win &lt; ${escapeHtml(formatNumber(config.lesson.minWinRate, 1))}% atau avgR &lt; ${escapeHtml(formatNumber(config.lesson.minAvgR, 2))}, streak ${escapeHtml(String(config.lesson.maxLosingStreak))}
+
+<b>Weak Setups</b>
+${weakRows.length ? weakRows.join("\n") : "Belum ada statistik lesson."}
+
+<b>Strong Setups</b>
+${strongRows.length ? strongRows.join("\n") : "Belum ada statistik lesson."}
+
+<b>Recent Lessons</b>
+${recentRows.length ? recentRows.join("\n") : "Belum ada lesson tersimpan."}
+`.trim();
+}
+
 function buildLastSignalMessage(state, symbol = "") {
   const decisions = state.research?.signalDecisions || [];
   const target = symbol.trim().toUpperCase();
@@ -337,6 +375,9 @@ async function handleCommand({ command, message, state, stateStore, config, appS
       break;
     case "/rejected":
       await notify(buildRejectedMessage(state), message.chat.id, keyboard);
+      break;
+    case "/lesson":
+      await notify(buildLessonMessage(state, config), message.chat.id, keyboard);
       break;
     case "/lastsignal":
     case "/why":

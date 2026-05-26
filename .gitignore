@@ -8,6 +8,15 @@ node_modules/
 *.pem
 *.key
 *.crt
+*.p12
+*.pfx
+*.cert
+*.secret
+*.secrets
+*secret*
+*token*
+*credential*
+*credentials*
 
 # Runtime state and local data
 state.json
@@ -18,6 +27,8 @@ state.json.tmp
 *.sqlite3
 *.db
 *.db-journal
+*.bak
+*.backup
 
 # Logs and process files
 logs/
@@ -59,4 +70,7 @@ desktop.ini
 
 # Local project notes
 ROADMAP.md
+roadmap.md
 session.txt
+session*.txt
+sessiontxt
