@@ -17,10 +17,13 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 - Paper trading futures-style dengan initial balance, notional, leverage, margin, liquidation, daily loss limit, drawdown limit, max notional, dan max used margin.
 - Telegram command center dengan role admin/operator/viewer dan inline keyboard.
 - State storage lokal atau PostgreSQL.
+- Market candle warehouse di PostgreSQL untuk menyimpan candle tertutup, memperkuat lesson, replay, dan dashboard.
+- Lesson learning untuk mencatat outcome sinyal dan menolak setup yang performanya buruk setelah sampel cukup.
+- Backup manual dan backup harian otomatis ke Telegram dalam format `.json.gz`.
 - State migration backup dan schema version.
 - Single-instance lock untuk mencegah dua process memproses state yang sama.
-- Health endpoint, dashboard HTML, dashboard JSON, dan Prometheus metrics.
-- Replay baseline via `npm run replay`.
+- Health endpoint, dark glass dashboard HTML, dashboard JSON, dan Prometheus metrics.
+- Replay baseline via `npm run replay` dan replay candle database via `npm run replay:db`.
 - Test suite via `npm test`.
 - Railway deployment config via `railway.json`.
 
@@ -30,11 +33,15 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 Exchange public API
   -> CCXT fetchOHLCV
   -> candle tertutup
+  -> upsert market_candles jika PostgreSQL aktif
+  -> ambil candle dari database untuk analisis jika tersedia
   -> hitung indikator dan market context
   -> jalankan filter strategi dan risk guard
+  -> cek lesson filter
   -> kirim alert Telegram
   -> simpan signal decision dan paper trade
   -> update lifecycle TP/SL/liquidation pada candle berikutnya
+  -> saat trade selesai, simpan lesson
 ```
 
 Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL tersentuh dalam candle yang sama, lifecycle dihitung konservatif karena data OHLC tidak memberi urutan intrabar.
@@ -91,6 +98,7 @@ npm run once
 npm start       # menjalankan scanner normal
 npm run once    # scan satu kali lalu exit
 npm run replay  # replay baseline dari candle exchange
+npm run replay:db # replay dari candle PostgreSQL market_candles
 npm run check   # syntax check file JS utama
 npm test        # menjalankan test Node.js
 ```
@@ -440,9 +448,11 @@ DAILY_BACKUP_HOUR=8
 
 Gunakan `/exportbackup` untuk backup manual. Command ini hanya bisa dipakai owner/admin. Jika `DAILY_BACKUP_ENABLED=true`, bot akan mengirim backup otomatis sekali per hari setelah jam `DAILY_BACKUP_HOUR` pada timezone `DAILY_BACKUP_TIMEZONE`.
 
+Backup tidak dikirim jika data bot masih kosong. Untuk `/exportbackup`, bot akan membalas bahwa data masih kosong. Untuk backup harian otomatis, bot diam dan menunggu sampai ada trade, signal decision, market snapshot, atau lesson.
+
 ## Lesson Learning
 
-Lesson learning mencatat hasil setiap sinyal yang sudah selesai sebagai lesson. Data yang disimpan meliputi symbol, arah, entry mode, market regime, score bucket, RR bucket, SL risk bucket, outcome, realized R, dan durasi trade. Jika `DATABASE_URL` aktif di Railway, lesson ikut tersimpan di `bot_state` dan juga disinkronkan ke tabel `bot_lessons` serta `bot_lesson_stats`.
+Lesson learning mencatat hasil setiap sinyal yang sudah selesai sebagai lesson. Data yang disimpan meliputi symbol, arah, entry mode, market regime, score bucket, RR bucket, SL risk bucket, outcome, realized R, durasi trade, dan konteks candle (`signalCandleTime`, `candleWindowStart`, `candleWindowEnd`, `candleWindowCount`). Jika `DATABASE_URL` aktif di Railway, lesson ikut tersimpan di `bot_state` dan juga disinkronkan ke tabel `bot_lessons` serta `bot_lesson_stats`.
 
 ```env
 LESSON_ENABLED=true
@@ -472,7 +482,16 @@ Untuk production, gunakan PostgreSQL:
 DATABASE_URL=postgresql://user:password@host:5432/database
 ```
 
-Jika `DATABASE_URL` diisi, bot memakai PostgreSQL dan membuat state table yang dibutuhkan. Saat migrasi awal, state file lama bisa dibaca lalu disimpan ke database.
+Jika `DATABASE_URL` diisi, bot memakai PostgreSQL dan membuat table yang dibutuhkan. Saat migrasi awal, state file lama bisa dibaca lalu disimpan ke database.
+
+Table PostgreSQL yang dibuat otomatis:
+
+```text
+bot_state          # state utama bot dalam JSONB
+bot_lessons        # lesson per closed signal/trade
+bot_lesson_stats   # agregasi statistik lesson
+market_candles     # candle tertutup untuk analisis/replay/dashboard
+```
 
 ### Market Candle Warehouse
 
@@ -484,6 +503,8 @@ MARKET_CANDLES_REPLAY_LIMIT=10000
 ```
 
 Saat aktif, setiap candle tertutup yang sudah diambil dari exchange disimpan ke tabel `market_candles` dengan unique key `exchange + market_type + symbol + timeframe + timestamp`. Analisis sinyal akan mencoba memakai candle dari database setelah upsert, lalu fallback ke hasil fetch exchange jika database belum tersedia atau query gagal.
+
+`MARKET_CANDLES_ANALYSIS_LIMIT` mengatur jumlah candle terakhir yang diambil dari database untuk analisis live. `MARKET_CANDLES_REPLAY_LIMIT` mengatur batas candle maksimal saat `npm run replay:db`.
 
 Tabel yang dibuat:
 
@@ -523,9 +544,11 @@ DASHBOARD_ENABLED=false
 Endpoint:
 
 - `GET /health` - status scanner, last successful scan, dan error terakhir.
-- `GET /dashboard` - dashboard HTML ringan.
+- `GET /dashboard` - dashboard HTML dark glass.
 - `GET /dashboard.json` - snapshot dashboard.
 - `GET /metrics` - Prometheus metrics.
+
+Dashboard menampilkan status scanner, metric trade/paper, open trade, recent closed trade, rejected decision, paper equity curve, dan chart recent candle close dari snapshot yang tersimpan.
 
 Catatan: `health.js` hanya start server jika `HEALTHCHECK_ENABLED=true` atau `DASHBOARD_ENABLED=true`. Endpoint `/metrics` tersedia pada server yang sama.
 
@@ -565,6 +588,8 @@ REPLAY_SOURCE=database
 REPLAY_SINCE=2026-05-01T00:00:00Z
 REPLAY_UNTIL=2026-05-26T00:00:00Z
 ```
+
+`npm run replay:db` membutuhkan `DATABASE_URL` dan data candle yang sudah terkumpul di `market_candles`. Jika tabel belum berisi candle untuk symbol/timeframe yang dipilih, replay DB akan melewati symbol tersebut.
 
 Syntax check:
 
@@ -607,7 +632,19 @@ TIMEFRAME=15m
 CANDLE_LIMIT=1000
 CHECK_INTERVAL_SECONDS=300
 DATABASE_URL=...
+MARKET_CANDLES_STORE_ENABLED=true
+MARKET_CANDLES_USE_FOR_ANALYSIS=true
+BACKUP_EXPORT_ENABLED=true
+DAILY_BACKUP_ENABLED=true
 ```
+
+Untuk membuka dashboard di Railway, aktifkan:
+
+```env
+DASHBOARD_ENABLED=true
+```
+
+Lalu buka domain public Railway di `/dashboard`. Jika ingin Railway melakukan HTTP healthcheck, aktifkan `HEALTHCHECK_ENABLED=true` dan tambahkan healthcheck path `/health` di konfigurasi Railway.
 
 ## Rekomendasi Setting Awal
 
@@ -674,6 +711,7 @@ PAPER_TRADING_MAX_DRAWDOWN_PERCENT=15
 - Market tidak memenuhi confirmation.
 - `MIN_CONFIRM`, `MIN_RR`, atau order block terlalu ketat.
 - HTF/regime/funding/OI filter menolak sinyal.
+- Lesson filter menolak setup yang secara historis lemah.
 - Cek `/rejected` atau `/why SYMBOL`.
 
 ### Sinyal banyak kena SL
@@ -691,6 +729,19 @@ PAPER_TRADING_MAX_DRAWDOWN_PERCENT=15
 - Liquidation terlalu dekat dengan SL.
 - Daily loss atau drawdown limit tercapai.
 - Max notional atau max used margin tercapai.
+
+### Dashboard kosong atau chart belum muncul
+
+- Pastikan `DASHBOARD_ENABLED=true`.
+- `Paper Equity Curve` baru terisi setelah paper trading aktif dan saldo/margin berubah.
+- `Recent Candle Close` memakai `research.marketSnapshots`; chart akan muncul setelah minimal dua scan menyimpan snapshot.
+- Jika memakai Railway, pastikan service punya public domain.
+
+### Command Telegram tidak muncul atau tidak diproses
+
+- `TELEGRAM_SYNC_COMMANDS=true` hanya memperbarui menu command Telegram.
+- `TELEGRAM_COMMANDS_ENABLED=true` tetap diperlukan agar command diproses.
+- Jika muncul error `409 getUpdates`, pastikan hanya satu instance bot aktif dengan token yang sama.
 
 ## Roadmap
 
