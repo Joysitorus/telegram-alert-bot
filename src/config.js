@@ -94,6 +94,13 @@ export const config = {
     maxRecords: toNumber(process.env.LESSON_MAX_RECORDS, 2000, { min: 100, max: 100000 })
   },
 
+  backup: {
+    exportEnabled: toBoolean(process.env.BACKUP_EXPORT_ENABLED, true),
+    dailyEnabled: toBoolean(process.env.DAILY_BACKUP_ENABLED, true),
+    timezone: process.env.DAILY_BACKUP_TIMEZONE || process.env.PERFORMANCE_REPORT_TIMEZONE || "Asia/Jakarta",
+    hour: toNumber(process.env.DAILY_BACKUP_HOUR, 8, { min: 0, max: 23 })
+  },
+
   strategy: {
     emaFast: toNumber(process.env.EMA_FAST, 20, { min: 1, max: 500 }),
     emaMid: toNumber(process.env.EMA_MID, 50, { min: 1, max: 500 }),

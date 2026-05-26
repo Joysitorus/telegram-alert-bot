@@ -167,6 +167,7 @@ Jika `TELEGRAM_ADMIN_IDS` kosong, hanya `TELEGRAM_CHAT_ID` yang boleh memakai co
 - `/lastsignal SYMBOL` - keputusan terakhir untuk symbol tertentu.
 - `/why SYMBOL` - alias untuk melihat alasan terakhir.
 - `/backup` - ringkasan state untuk backup cepat.
+- `/exportbackup` - kirim file backup state `.json.gz` ke Telegram.
 - `/open` - trade terbuka.
 - `/symbols` - daftar symbol yang dipantau.
 - `/settings` - setting utama bot.
@@ -424,6 +425,19 @@ TP2_EXIT_PORTION=0.33
 
 Metrics yang dilacak meliputi winrate, TP hit rate, average R, average PnL, paper balance, drawdown, rejected trade, liquidation, dan open exposure.
 
+## Backup Export
+
+Bot bisa mengirim backup state sebagai file `.json.gz` ke Telegram. Backup berisi state bot, trade history, paper account, signal decisions, market snapshots, lesson, dan lesson stats. Backup tidak menyertakan env secret seperti `TELEGRAM_BOT_TOKEN` atau `DATABASE_URL`.
+
+```env
+BACKUP_EXPORT_ENABLED=true
+DAILY_BACKUP_ENABLED=true
+DAILY_BACKUP_TIMEZONE=Asia/Jakarta
+DAILY_BACKUP_HOUR=8
+```
+
+Gunakan `/exportbackup` untuk backup manual. Command ini hanya bisa dipakai owner/admin. Jika `DAILY_BACKUP_ENABLED=true`, bot akan mengirim backup otomatis sekali per hari setelah jam `DAILY_BACKUP_HOUR` pada timezone `DAILY_BACKUP_TIMEZONE`.
+
 ## Lesson Learning
 
 Lesson learning mencatat hasil setiap sinyal yang sudah selesai sebagai lesson. Data yang disimpan meliputi symbol, arah, entry mode, market regime, score bucket, RR bucket, SL risk bucket, outcome, realized R, dan durasi trade. Jika `DATABASE_URL` aktif di Railway, lesson ikut tersimpan di `bot_state` dan juga disinkronkan ke tabel `bot_lessons` serta `bot_lesson_stats`.
@@ -534,7 +548,7 @@ Langkah umum:
 4. Isi Variables berdasarkan `.env.example`.
 5. Gunakan PostgreSQL atau persistent volume untuk state production.
 6. Aktifkan `SINGLE_INSTANCE_LOCK_ENABLED=true`.
-7. Aktifkan `HEALTHCHECK_ENABLED=true` jika ingin endpoint health.
+7. `railway.json` default tidak memakai healthcheck karena bot berjalan sebagai worker tanpa HTTP listener wajib. Jika ingin memakai endpoint health, aktifkan `HEALTHCHECK_ENABLED=true` dan tambahkan healthcheck path `/health` di Railway.
 8. Redeploy service.
 
 Minimal variables production:

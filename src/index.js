@@ -1,4 +1,5 @@
 import ccxt from "ccxt";
+import { gzipSync } from "zlib";
 import { runCommandLoop, syncTelegramCommands } from "./commands.js";
 import { config, getConfigHash, getStrategyConfigForSymbol, validateConfig } from "./config.js";
 import { startHealthServer } from "./health.js";
@@ -11,6 +12,7 @@ import {
   getPaperAccountState,
   getPerformanceState,
   getRuntimeState,
+  normalizeState,
   recordMarketSnapshot,
   recordLessonsFromClosedTrades,
   recordSignalDecision,
@@ -28,6 +30,7 @@ import {
   buildStartupMessage,
   buildTradeEventMessage,
   buildWeeklyPerformanceMessage,
+  sendTelegramDocument,
   sendTelegramMessage
 } from "./telegram.js";
 import { formatDateTime, formatNumber, formatPrice, sleep, timeframeToMs } from "./utils.js";
@@ -35,6 +38,7 @@ import { formatDateTime, formatNumber, formatPrice, sleep, timeframeToMs } from 
 let isShuttingDown = false;
 let stateStore = null;
 let healthServer = null;
+let currentState = null;
 const logger = createLogger(config.runtime.logLevel);
 
 const oneDayMs = 24 * 60 * 60 * 1000;
@@ -83,6 +87,12 @@ function getMonthlyReportKey(timestamp, reportConfig) {
   const parts = getZonedDateParts(timestamp, reportConfig.reportTimezone);
   if (Number(parts.day) !== reportConfig.monthlyReportDay || parts.hour < reportConfig.monthlyReportHour) return null;
   return `${parts.year}-${parts.month}`;
+}
+
+function getDailyBackupKey(timestamp, backupConfig) {
+  const parts = getZonedDateParts(timestamp, backupConfig.timezone);
+  if (parts.hour < backupConfig.hour) return null;
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function buildPerformanceReport(state, periodMs, now = Date.now()) {
@@ -359,6 +369,87 @@ async function notify(text, chatId = config.telegram.chatId, replyMarkup = null)
   );
 }
 
+function getCurrentStateForBackup() {
+  if (!currentState) throw new Error("State belum siap untuk export backup.");
+  return currentState;
+}
+
+function buildBackupExport(state, reason = "manual") {
+  const generatedAt = new Date().toISOString();
+  const payload = {
+    type: "telegram-crypto-alert-bot-backup",
+    version: 1,
+    reason,
+    generatedAt,
+    state: normalizeState(state)
+  };
+  const json = JSON.stringify(payload, null, 2);
+  const buffer = gzipSync(Buffer.from(json, "utf8"));
+  const timestamp = generatedAt.replace(/[:.]/g, "-");
+
+  return {
+    filename: `crypto-alert-bot-backup-${timestamp}.json.gz`,
+    buffer,
+    generatedAt,
+    rawBytes: Buffer.byteLength(json),
+    compressedBytes: buffer.length
+  };
+}
+
+function hasBackupData(state) {
+  const normalized = normalizeState(state);
+  const performance = normalized.performance || {};
+  const research = normalized.research || {};
+
+  return [
+    performance.openTrades,
+    performance.closedTrades,
+    performance.paperTrades,
+    research.signalDecisions,
+    research.marketSnapshots,
+    research.lessons
+  ].some((items) => Array.isArray(items) && items.length > 0);
+}
+
+async function exportBackup(chatId = config.telegram.chatId, reason = "manual", { notifyWhenEmpty = true } = {}) {
+  if (!config.backup.exportEnabled) return { sent: false, reason: "disabled" };
+
+  const state = getCurrentStateForBackup();
+  if (!hasBackupData(state)) {
+    if (notifyWhenEmpty) {
+      await notify("Backup tidak dikirim karena data bot masih kosong.", chatId);
+    }
+    return { sent: false, reason: "empty" };
+  }
+
+  const backup = buildBackupExport(state, reason);
+  const caption = [
+    "<b>Crypto Alert Bot Backup</b>",
+    "",
+    `<b>Reason:</b> ${reason}`,
+    `<b>Generated:</b> ${backup.generatedAt}`,
+    `<b>Compressed:</b> ${formatNumber(backup.compressedBytes / 1024, 2)} KB`,
+    `<b>Raw:</b> ${formatNumber(backup.rawBytes / 1024, 2)} KB`
+  ].join("\n");
+
+  await withRetry(
+    () => sendTelegramDocument({
+      botToken: config.telegram.botToken,
+      chatId,
+      filename: backup.filename,
+      buffer: backup.buffer,
+      caption
+    }),
+    {
+      retries: config.runtime.retryAttempts,
+      delayMs: config.runtime.retryDelayMs,
+      label: "telegram sendDocument backup"
+    }
+  );
+
+  return { sent: true, reason: null };
+}
+
 async function syncTelegramCommandsIfEnabled() {
   if (!config.telegram.syncCommands) return;
 
@@ -612,6 +703,20 @@ async function sendPaperPerformanceReportIfDue(state, stateStore) {
   await stateStore.save(state);
 }
 
+async function sendDailyBackupIfDue(state, stateStore) {
+  if (!config.backup.exportEnabled || !config.backup.dailyEnabled) return;
+
+  const runtime = getRuntimeState(state);
+  const backupKey = getDailyBackupKey(Date.now(), config.backup);
+  if (!backupKey || runtime.lastDailyBackupKey === backupKey) return;
+
+  const result = await exportBackup(config.telegram.chatId, "daily", { notifyWhenEmpty: false });
+  if (!result.sent && result.reason === "empty") return;
+  runtime.lastDailyBackupKey = backupKey;
+  await stateStore.save(state);
+  logger.info("daily backup sent", { backupKey });
+}
+
 async function scanAll({ exchange, state, stateStore, errorThrottler }) {
   const runtime = getRuntimeState(state);
   runtime.lastScanAt = Date.now();
@@ -688,6 +793,7 @@ async function main() {
     await stateStore.acquireLock(config.runtime.lockFile);
   }
   const state = await stateStore.load();
+  currentState = state;
   runStartupSelfCheck({ exchange, state });
   const appStatus = { scanRequested: false };
   const errorThrottler = new ErrorThrottler(config.runtime.errorAlertCooldownSeconds * 1000);
@@ -709,6 +815,7 @@ async function main() {
     config,
     appStatus,
     notify,
+    exportBackup,
     isShuttingDown: () => isShuttingDown
   });
 
@@ -729,6 +836,12 @@ async function main() {
     } else {
       appStatus.scanRequested = false;
       await scanAll({ exchange, state, stateStore, errorThrottler });
+    }
+
+    try {
+      await sendDailyBackupIfDue(state, stateStore);
+    } catch (error) {
+      logger.error("daily backup failed", { error: error.message });
     }
 
     if (config.exchange.runOnce) {

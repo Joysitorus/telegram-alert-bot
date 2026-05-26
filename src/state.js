@@ -54,7 +54,8 @@ export function createDefaultState() {
       lastScanSuccessAt: null,
       lastScanErrorAt: null,
       lastScanError: null,
-      lastHeartbeatAt: null
+      lastHeartbeatAt: null,
+      lastDailyBackupKey: null
     }
   };
 }
@@ -126,6 +127,7 @@ export function normalizeState(state) {
   if (!Object.hasOwn(normalized.runtime, "lastScanErrorAt")) normalized.runtime.lastScanErrorAt = null;
   if (!Object.hasOwn(normalized.runtime, "lastScanError")) normalized.runtime.lastScanError = null;
   if (!Object.hasOwn(normalized.runtime, "lastHeartbeatAt")) normalized.runtime.lastHeartbeatAt = null;
+  if (!Object.hasOwn(normalized.runtime, "lastDailyBackupKey")) normalized.runtime.lastDailyBackupKey = null;
 
   return normalized;
 }

@@ -21,6 +21,30 @@ export async function sendTelegramMessage({ botToken, chatId, text, replyMarkup 
   });
 }
 
+export async function sendTelegramDocument({ botToken, chatId, filename, buffer, caption = "", contentType = "application/gzip" }) {
+  if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN belum diisi.");
+  if (!chatId) throw new Error("TELEGRAM_CHAT_ID belum diisi.");
+
+  const url = `https://api.telegram.org/bot${botToken}/sendDocument`;
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  if (caption) {
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+  }
+  form.append("document", new Blob([buffer], { type: contentType }), filename);
+
+  const response = await fetch(url, {
+    method: "POST",
+    body: form
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok || !body.ok) {
+    throw new Error(body.description || `Telegram sendDocument gagal: ${response.status}`);
+  }
+}
+
 export function buildSignalMessage(signal, priceDecimals = 12) {
   const directionEmoji = signal.direction === "BUY" ? "🟢" : "🔴";
   const pair = `${signal.exchange}:${signal.symbol}`;

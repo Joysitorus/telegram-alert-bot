@@ -16,6 +16,7 @@ export const telegramCommandDefinitions = [
   { command: "lastsignal", description: "decision terakhir symbol" },
   { command: "why", description: "alasan terakhir symbol" },
   { command: "backup", description: "ringkasan backup state" },
+  { command: "exportbackup", description: "kirim file backup state" },
   { command: "open", description: "trade terbuka" },
   { command: "symbols", description: "daftar symbol" },
   { command: "settings", description: "setting bot" },
@@ -67,6 +68,10 @@ function getRole(message, telegramConfig) {
 
 function canMutate(role) {
   return role === "owner" || role === "operator";
+}
+
+function canExportBackup(role) {
+  return role === "owner";
 }
 
 async function getUpdates(botToken, offset, timeoutSeconds) {
@@ -133,6 +138,7 @@ function buildHelpMessage() {
 /lastsignal SYMBOL - decision terakhir untuk symbol
 /why SYMBOL - alasan terakhir symbol diterima/ditolak
 /backup - ringkasan backup state
+/exportbackup - kirim file backup state
 /open - daftar trade terbuka
 /symbols - daftar symbol yang dipantau
 /pause - pause scanner
@@ -381,7 +387,7 @@ function buildSettingsMessage(config, storeType) {
 `.trim();
 }
 
-async function handleCommand({ command, message, state, stateStore, config, appStatus, notify, role }) {
+async function handleCommand({ command, message, state, stateStore, config, appStatus, notify, exportBackup, role }) {
   const keyboard = buildControlKeyboard();
   const args = parseCommandArgs(message.text);
 
@@ -420,6 +426,17 @@ async function handleCommand({ command, message, state, stateStore, config, appS
       break;
     case "/backup":
       await notify(buildBackupMessage(state), message.chat.id, keyboard);
+      break;
+    case "/exportbackup":
+      if (!config.backup.exportEnabled) {
+        await notify("Export backup sedang dinonaktifkan.", message.chat.id);
+        break;
+      }
+      if (!canExportBackup(role)) {
+        await notify("Akses ditolak untuk export backup.", message.chat.id);
+        break;
+      }
+      await exportBackup(message.chat.id, "manual");
       break;
     case "/open":
       await notify(buildOpenTradesMessage(state), message.chat.id, keyboard);
@@ -490,7 +507,7 @@ async function handleCommand({ command, message, state, stateStore, config, appS
   }
 }
 
-export async function runCommandLoop({ state, stateStore, config, appStatus, notify, isShuttingDown }) {
+export async function runCommandLoop({ state, stateStore, config, appStatus, notify, exportBackup, isShuttingDown }) {
   if (!config.telegram.commandsEnabled) return;
 
   while (!isShuttingDown()) {
@@ -515,7 +532,7 @@ export async function runCommandLoop({ state, stateStore, config, appStatus, not
         }
 
         const role = getRole(message, config.telegram);
-        await handleCommand({ command, message, state, stateStore, config, appStatus, notify, role });
+        await handleCommand({ command, message, state, stateStore, config, appStatus, notify, exportBackup, role });
         if (callbackQuery) await answerCallbackQuery(config.telegram.botToken, callbackQuery.id);
       }
 
