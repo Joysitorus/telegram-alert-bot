@@ -1,5 +1,6 @@
 import ccxt from "ccxt";
 import { config, getStrategyConfigForSymbol } from "./config.js";
+import { createStateStore } from "./storage.js";
 import { analyzeSymbol } from "./strategy.js";
 import {
   addPaperTrade,
@@ -29,6 +30,20 @@ async function fetchReplayCandles(exchange, symbol) {
     paginationCalls: Number(process.env.REPLAY_PAGINATION_CALLS || 5)
   });
   return raw.map(toCandle);
+}
+
+async function loadReplayCandlesFromDatabase(stateStore, exchange, symbol) {
+  const since = process.env.REPLAY_SINCE ? exchange.parse8601(process.env.REPLAY_SINCE) : null;
+  const until = process.env.REPLAY_UNTIL ? exchange.parse8601(process.env.REPLAY_UNTIL) : null;
+  return stateStore.loadCandlesRange({
+    exchangeId: config.exchange.id,
+    marketType: config.exchange.marketType,
+    symbol,
+    timeframe: config.exchange.timeframe,
+    since,
+    until,
+    limit: config.marketData.replayLimit
+  });
 }
 
 function summarize(state) {
@@ -64,6 +79,8 @@ async function main() {
   await exchange.loadMarkets();
 
   const state = createDefaultState();
+  const useDatabase = process.env.REPLAY_SOURCE === "database" || process.env.REPLAY_USE_DB === "true";
+  const stateStore = useDatabase ? createStateStore(config.runtime) : null;
   const lifecycleOptions = {
     maxOpenCandles: config.performance.tradeExpiryCandles,
     paperConfig: config.paper
@@ -72,7 +89,14 @@ async function main() {
   for (const symbol of config.exchange.symbols) {
     const key = `${config.exchange.id}:${symbol}:${config.exchange.timeframe}`;
     const strategyConfig = getStrategyConfigForSymbol(symbol);
-    const candles = await fetchReplayCandles(exchange, symbol);
+    const candles = useDatabase
+      ? await loadReplayCandlesFromDatabase(stateStore, exchange, symbol)
+      : await fetchReplayCandles(exchange, symbol);
+
+    if (useDatabase && candles.length === 0) {
+      console.warn(`Tidak ada candle database untuk ${symbol} ${config.exchange.timeframe}.`);
+      continue;
+    }
 
     for (let index = 250; index < candles.length; index += 1) {
       const window = candles.slice(0, index + 1);
@@ -96,6 +120,7 @@ async function main() {
   }
 
   console.log(JSON.stringify(summarize(state), null, 2));
+  if (stateStore) await stateStore.close();
 }
 
 main().catch((error) => {

@@ -12,6 +12,8 @@ function buildDashboardSnapshot(state) {
   const runtime = getRuntimeState(state);
   const performance = getPerformanceState(state);
   const closedTrades = performance.closedTrades.slice(-50).reverse();
+  const marketSnapshots = (state.research?.marketSnapshots || []).slice(-160);
+  const signalDecisions = state.research?.signalDecisions || [];
 
   return {
     runtime,
@@ -19,6 +21,8 @@ function buildDashboardSnapshot(state) {
     openTrades: performance.openTrades,
     closedTrades,
     paperTrades: performance.paperTrades.slice(-50).reverse(),
+    marketSnapshots,
+    signalDecisions: signalDecisions.slice(-80),
     totals: {
       open: performance.openTrades.length,
       closed: performance.closedTrades.length,
@@ -111,6 +115,54 @@ function buildEquitySvg(points = []) {
       </defs>
       <path class="chart-grid" d="M0,40 H760 M0,80 H760 M0,120 H760"/>
       <path d="${path}" fill="none" stroke="url(#equityLine)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+}
+
+function buildPriceSvg(points = [], decisions = []) {
+  const data = points.slice(-120);
+  if (data.length < 2) return `<div class="empty-chart">No candle data</div>`;
+
+  const width = 960;
+  const height = 240;
+  const closes = data.map((point) => Number(point.close) || 0);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = max - min || 1;
+  const firstTime = Number(data[0].candleTime);
+  const lastTime = Number(data.at(-1).candleTime);
+  const timeSpan = Math.max(1, lastTime - firstTime);
+  const xForTime = (timestamp) => (Number(timestamp) - firstTime) / timeSpan * width;
+  const yForPrice = (price) => height - ((Number(price) || 0) - min) / span * height;
+  const path = data.map((point, index) => {
+    const x = index / (data.length - 1) * width;
+    const y = yForPrice(point.close);
+    return `${index === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const markers = decisions
+    .filter((decision) => decision.accepted && decision.direction && decision.debug?.lastCandleTime >= firstTime)
+    .slice(-20)
+    .map((decision) => {
+      const candle = data.find((point) => point.candleTime === decision.debug?.lastCandleTime) || data.at(-1);
+      const x = Math.max(0, Math.min(width, xForTime(decision.debug?.lastCandleTime || candle.candleTime)));
+      const y = Math.max(10, Math.min(height - 10, yForPrice(decision.debug?.close || candle.close)));
+      const cls = decision.direction === "BUY" ? "marker-buy" : "marker-sell";
+      return `<circle class="${cls}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="6"><title>${escapeHtml(decision.symbol)} ${escapeHtml(decision.direction)}</title></circle>`;
+    })
+    .join("");
+
+  return `
+    <svg class="chart price-chart" viewBox="0 0 ${width} ${height}" role="img">
+      <defs>
+        <linearGradient id="priceLine" x1="0" x2="1" y1="0" y2="0">
+          <stop offset="0%" stop-color="#38bdf8"/>
+          <stop offset="60%" stop-color="#5eead4"/>
+          <stop offset="100%" stop-color="#facc15"/>
+        </linearGradient>
+      </defs>
+      <path class="chart-grid" d="M0,60 H960 M0,120 H960 M0,180 H960"/>
+      <path d="${path}" fill="none" stroke="url(#priceLine)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      ${markers}
     </svg>
   `;
 }
@@ -254,6 +306,8 @@ function buildDashboardHtml(state, status) {
     .chart-wrap { padding: 18px; }
     .chart { width: 100%; height: 220px; display: block; }
     .chart-grid { fill: none; stroke: rgba(148, 163, 184, 0.16); stroke-width: 1; }
+    .marker-buy { fill: var(--green); stroke: rgba(7, 10, 15, 0.85); stroke-width: 3; }
+    .marker-sell { fill: var(--red); stroke: rgba(7, 10, 15, 0.85); stroke-width: 3; }
     .empty-chart {
       min-height: 160px;
       display: grid;
@@ -297,6 +351,8 @@ function buildDashboardHtml(state, status) {
     </section>
     <h2>Open Trades</h2>
     <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>TF</th><th>Entry</th><th>Exit</th><th>R</th><th>Opened</th></tr></thead><tbody>${openRows}</tbody></table></div>
+    <h2>Recent Candle Close</h2>
+    <div class="chart-wrap">${buildPriceSvg(snapshot.marketSnapshots, snapshot.signalDecisions)}</div>
     <h2>Paper Equity Curve</h2>
     <div class="chart-wrap">${buildEquitySvg(snapshot.paperAccount?.equityCurve || [])}</div>
     <h2>Recent Closed Trades</h2>

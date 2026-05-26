@@ -9,6 +9,25 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function rowToCandle(row) {
+  return {
+    timestamp: Number(row.timestamp),
+    open: Number(row.open),
+    high: Number(row.high),
+    low: Number(row.low),
+    close: Number(row.close),
+    volume: Number(row.volume)
+  };
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 class FileStateStore {
   constructor(stateFile) {
     this.type = "file";
@@ -23,6 +42,18 @@ class FileStateStore {
 
   async save(state) {
     saveState(this.stateFile, state);
+  }
+
+  async saveCandles() {
+    return { saved: 0, supported: false };
+  }
+
+  async loadCandles() {
+    return [];
+  }
+
+  async loadCandlesRange() {
+    return [];
   }
 
   async close() {
@@ -114,6 +145,26 @@ class PostgresStateStore {
         data jsonb NOT NULL,
         updated_at timestamptz NOT NULL DEFAULT now()
       )
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS market_candles (
+        exchange text NOT NULL,
+        market_type text NOT NULL,
+        symbol text NOT NULL,
+        timeframe text NOT NULL,
+        timestamp bigint NOT NULL,
+        open double precision NOT NULL,
+        high double precision NOT NULL,
+        low double precision NOT NULL,
+        close double precision NOT NULL,
+        volume double precision NOT NULL,
+        fetched_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (exchange, market_type, symbol, timeframe, timestamp)
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS market_candles_lookup_idx
+      ON market_candles (exchange, market_type, symbol, timeframe, timestamp DESC)
     `);
 
     this.ready = true;
@@ -221,6 +272,118 @@ class PostgresStateStore {
       );
       this.syncedLessonStats.set(id, fingerprint);
     }
+  }
+
+  async saveCandles({ exchangeId, marketType, symbol, timeframe, candles }) {
+    await this.init();
+    const rows = (Array.isArray(candles) ? candles : [])
+      .map((candle) => ({
+        timestamp: finiteNumberOrNull(candle.timestamp),
+        open: finiteNumberOrNull(candle.open),
+        high: finiteNumberOrNull(candle.high),
+        low: finiteNumberOrNull(candle.low),
+        close: finiteNumberOrNull(candle.close),
+        volume: finiteNumberOrNull(candle.volume)
+      }))
+      .filter((candle) => (
+        candle.timestamp !== null &&
+        candle.open !== null &&
+        candle.high !== null &&
+        candle.low !== null &&
+        candle.close !== null &&
+        candle.volume !== null
+      ));
+
+    if (rows.length === 0) return { saved: 0, supported: true };
+
+    for (const chunk of chunkArray(rows, 500)) {
+      const values = [];
+      const placeholders = chunk.map((candle, index) => {
+        const offset = index * 10;
+        values.push(
+          exchangeId,
+          marketType,
+          symbol,
+          timeframe,
+          candle.timestamp,
+          candle.open,
+          candle.high,
+          candle.low,
+          candle.close,
+          candle.volume
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, now())`;
+      });
+
+      await this.client.query(
+        `INSERT INTO market_candles (
+          exchange, market_type, symbol, timeframe, timestamp, open, high, low, close, volume, fetched_at
+        )
+        VALUES ${placeholders.join(",")}
+        ON CONFLICT (exchange, market_type, symbol, timeframe, timestamp)
+        DO UPDATE SET
+          open = EXCLUDED.open,
+          high = EXCLUDED.high,
+          low = EXCLUDED.low,
+          close = EXCLUDED.close,
+          volume = EXCLUDED.volume,
+          fetched_at = now()`,
+        values
+      );
+    }
+
+    return { saved: rows.length, supported: true };
+  }
+
+  async loadCandles({ exchangeId, marketType, symbol, timeframe, limit }) {
+    await this.init();
+    const result = await this.client.query(
+      `SELECT timestamp, open, high, low, close, volume
+       FROM market_candles
+       WHERE exchange = $1
+         AND market_type = $2
+         AND symbol = $3
+         AND timeframe = $4
+       ORDER BY timestamp DESC
+       LIMIT $5`,
+      [exchangeId, marketType, symbol, timeframe, Math.max(1, Number(limit) || 1000)]
+    );
+
+    return result.rows
+      .reverse()
+      .map(rowToCandle);
+  }
+
+  async loadCandlesRange({ exchangeId, marketType, symbol, timeframe, since = null, until = null, limit = 10000 }) {
+    await this.init();
+    const params = [exchangeId, marketType, symbol, timeframe];
+    const conditions = [
+      "exchange = $1",
+      "market_type = $2",
+      "symbol = $3",
+      "timeframe = $4"
+    ];
+
+    if (since !== null && since !== undefined) {
+      params.push(Number(since));
+      conditions.push(`timestamp >= $${params.length}`);
+    }
+    if (until !== null && until !== undefined) {
+      params.push(Number(until));
+      conditions.push(`timestamp <= $${params.length}`);
+    }
+
+    params.push(Math.max(1, Number(limit) || 10000));
+    const result = await this.client.query(
+      `SELECT timestamp, open, high, low, close, volume
+       FROM market_candles
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY timestamp ASC
+       LIMIT $${params.length}`,
+      params
+    );
+
+    return result.rows.map(rowToCandle);
   }
 
   async close() {

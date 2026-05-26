@@ -101,6 +101,13 @@ export const config = {
     hour: toNumber(process.env.DAILY_BACKUP_HOUR, 8, { min: 0, max: 23 })
   },
 
+  marketData: {
+    storeCandles: toBoolean(process.env.MARKET_CANDLES_STORE_ENABLED, true),
+    useStoredCandles: toBoolean(process.env.MARKET_CANDLES_USE_FOR_ANALYSIS, true),
+    analysisLimit: toNumber(process.env.MARKET_CANDLES_ANALYSIS_LIMIT, process.env.CANDLE_LIMIT || 1000, { min: 250, max: 5000 }),
+    replayLimit: toNumber(process.env.MARKET_CANDLES_REPLAY_LIMIT, 10000, { min: 250, max: 250000 })
+  },
+
   strategy: {
     emaFast: toNumber(process.env.EMA_FAST, 20, { min: 1, max: 500 }),
     emaMid: toNumber(process.env.EMA_MID, 50, { min: 1, max: 500 }),

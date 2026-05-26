@@ -204,6 +204,45 @@ async function fetchClosedCandles(exchange, symbol, timeframe = config.exchange.
     .map(toCandle);
 }
 
+async function loadAnalysisCandles({ exchange, stateStore, symbol, timeframe = config.exchange.timeframe }) {
+  const fetchedCandles = await fetchClosedCandles(exchange, symbol, timeframe);
+
+  if (!config.runtime.databaseUrl || !config.marketData.storeCandles) {
+    return fetchedCandles;
+  }
+
+  try {
+    await stateStore.saveCandles({
+      exchangeId: config.exchange.id,
+      marketType: config.exchange.marketType,
+      symbol,
+      timeframe,
+      candles: fetchedCandles
+    });
+  } catch (error) {
+    logger.warn("market candle save failed", { symbol, timeframe, error: error.message });
+    return fetchedCandles;
+  }
+
+  if (!config.marketData.useStoredCandles) {
+    return fetchedCandles;
+  }
+
+  try {
+    const storedCandles = await stateStore.loadCandles({
+      exchangeId: config.exchange.id,
+      marketType: config.exchange.marketType,
+      symbol,
+      timeframe,
+      limit: config.marketData.analysisLimit
+    });
+    return storedCandles.length >= fetchedCandles.length ? storedCandles : fetchedCandles;
+  } catch (error) {
+    logger.warn("market candle load failed", { symbol, timeframe, error: error.message });
+    return fetchedCandles;
+  }
+}
+
 function getHigherTimeframeTrend(candles, strategyConfig) {
   if (!candles.length) return "NEUTRAL";
   const last = candles[candles.length - 1];
@@ -468,7 +507,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const runtime = getRuntimeState(state);
   const paperEnabled = runtime.paperEnabledOverride ?? config.paper.enabled;
 
-  const candles = await fetchClosedCandles(exchange, symbol);
+  const candles = await loadAnalysisCandles({ exchange, stateStore, symbol });
   const lastCandle = candles.at(-1);
   if (lastCandle) {
     recordMarketSnapshot(state, {
@@ -512,7 +551,12 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   });
 
   if (analysis.hasSignal && strategyConfig.requireHigherTimeframeTrend && strategyConfig.higherTimeframe) {
-    const higherCandles = await fetchClosedCandles(exchange, symbol, strategyConfig.higherTimeframe);
+    const higherCandles = await loadAnalysisCandles({
+      exchange,
+      stateStore,
+      symbol,
+      timeframe: strategyConfig.higherTimeframe
+    });
     const higherTrend = getHigherTimeframeTrend(higherCandles, strategyConfig);
     analysis.signal.higherTimeframe = strategyConfig.higherTimeframe;
     analysis.signal.higherTimeframeTrend = higherTrend;
@@ -523,6 +567,11 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   }
 
   if (analysis.hasSignal) {
+    const contextStartIndex = Math.max(0, candles.length - config.marketData.analysisLimit);
+    analysis.signal.candleWindowStart = candles[contextStartIndex]?.timestamp ?? null;
+    analysis.signal.candleWindowEnd = candles.at(-1)?.timestamp ?? null;
+    analysis.signal.candleWindowCount = candles.length;
+
     const marketDataFilter = await signalPassesMarketDataFilters(exchange, symbol, strategyConfig, analysis.signal);
     analysis.signal.marketDataFilters = marketDataFilter.metrics;
     if (!marketDataFilter.passes) {

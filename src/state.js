@@ -153,6 +153,10 @@ function buildTradeFromSignal(key, signal, prefix = "trade") {
     tp3ExitPortion: signal.tp3ExitPortion ?? 0.34,
     openedAt: signal.candleTime,
     lastCheckedCandleTime: signal.candleTime,
+    signalCandleTime: signal.candleTime,
+    candleWindowStart: signal.candleWindowStart ?? null,
+    candleWindowEnd: signal.candleWindowEnd ?? null,
+    candleWindowCount: signal.candleWindowCount ?? null,
     entryMode: signal.entryMode || null,
     rr: signal.rr,
     slRiskPercent: signal.slRiskPercent,
@@ -933,6 +937,10 @@ export function recordLessonsFromClosedTrades(state, trades, options = {}) {
       pnlPercent: Number(trade.pnlPercent) || Number(trade.realizedPnlPercent) || 0,
       openedAt: trade.openedAt,
       closedAt: trade.closedAt,
+      signalCandleTime: trade.signalCandleTime ?? trade.openedAt,
+      candleWindowStart: trade.candleWindowStart ?? null,
+      candleWindowEnd: trade.candleWindowEnd ?? null,
+      candleWindowCount: trade.candleWindowCount ?? null,
       openCandleCount: Number(trade.openCandleCount) || 0,
       features
     };

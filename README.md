@@ -39,6 +39,8 @@ Exchange public API
 
 Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL tersentuh dalam candle yang sama, lifecycle dihitung konservatif karena data OHLC tidak memberi urutan intrabar.
 
+Jika `DATABASE_URL` aktif, bot juga bisa menyimpan candle yang sudah diambil ke PostgreSQL agar data sinyal, lesson, replay, dan dashboard makin kuat. Candle tetap diambil dari exchange sebagai sumber awal, lalu di-upsert ke tabel `market_candles`.
+
 ## Instalasi Lokal
 
 Butuh Node.js 18 atau lebih baru.
@@ -472,6 +474,34 @@ DATABASE_URL=postgresql://user:password@host:5432/database
 
 Jika `DATABASE_URL` diisi, bot memakai PostgreSQL dan membuat state table yang dibutuhkan. Saat migrasi awal, state file lama bisa dibaca lalu disimpan ke database.
 
+### Market Candle Warehouse
+
+```env
+MARKET_CANDLES_STORE_ENABLED=true
+MARKET_CANDLES_USE_FOR_ANALYSIS=true
+MARKET_CANDLES_ANALYSIS_LIMIT=1000
+MARKET_CANDLES_REPLAY_LIMIT=10000
+```
+
+Saat aktif, setiap candle tertutup yang sudah diambil dari exchange disimpan ke tabel `market_candles` dengan unique key `exchange + market_type + symbol + timeframe + timestamp`. Analisis sinyal akan mencoba memakai candle dari database setelah upsert, lalu fallback ke hasil fetch exchange jika database belum tersedia atau query gagal.
+
+Tabel yang dibuat:
+
+```text
+market_candles
+- exchange
+- market_type
+- symbol
+- timeframe
+- timestamp
+- open
+- high
+- low
+- close
+- volume
+- fetched_at
+```
+
 Runtime guard:
 
 ```env
@@ -520,6 +550,20 @@ Replay baseline:
 
 ```bash
 npm run replay
+```
+
+Replay dari candle database:
+
+```bash
+npm run replay:db
+```
+
+Filter waktu opsional:
+
+```env
+REPLAY_SOURCE=database
+REPLAY_SINCE=2026-05-01T00:00:00Z
+REPLAY_UNTIL=2026-05-26T00:00:00Z
 ```
 
 Syntax check:
