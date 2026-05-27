@@ -78,6 +78,10 @@ ${directionEmoji} <b>${escapeHtml(signal.direction)} SIGNAL</b>
 <b>Order Block Score:</b> ${escapeHtml(formatNumber(signal.orderBlockScore, 2))}
 <b>Order Block Zone:</b> <code>${escapeHtml(formatPrice(signal.orderBlockZoneLow, priceDecimals))}</code> - <code>${escapeHtml(formatPrice(signal.orderBlockZoneHigh, priceDecimals))}</code>
 <b>Order Block Age:</b> ${escapeHtml(String(signal.orderBlockAge))} candles
+
+<b>Order Book Mid:</b> ${escapeHtml(formatPrice(signal.orderBookLiquidity?.midPrice, priceDecimals))}
+<b>Nearest Bid Wall:</b> ${escapeHtml(formatPrice(signal.orderBookLiquidity?.nearestBidWall?.price, priceDecimals))} / ${escapeHtml(formatNumber(signal.orderBookLiquidity?.nearestBidWall?.notional, 2))}
+<b>Nearest Ask Wall:</b> ${escapeHtml(formatPrice(signal.orderBookLiquidity?.nearestAskWall?.price, priceDecimals))} / ${escapeHtml(formatNumber(signal.orderBookLiquidity?.nearestAskWall?.notional, 2))}
 `.trim();
 }
 

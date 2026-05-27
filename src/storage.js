@@ -56,6 +56,10 @@ class FileStateStore {
     return [];
   }
 
+  async saveOrderBookLiquidity() {
+    return { saved: 0, supported: false };
+  }
+
   async close() {
     await this.releaseLock();
   }
@@ -165,6 +169,23 @@ class PostgresStateStore {
     await this.client.query(`
       CREATE INDEX IF NOT EXISTS market_candles_lookup_idx
       ON market_candles (exchange, market_type, symbol, timeframe, timestamp DESC)
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS order_book_liquidity_zones (
+        id text PRIMARY KEY,
+        exchange text NOT NULL,
+        market_type text NOT NULL,
+        symbol text NOT NULL,
+        timestamp bigint NOT NULL,
+        mid_price double precision,
+        spread_percent double precision,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS order_book_liquidity_zones_lookup_idx
+      ON order_book_liquidity_zones (exchange, market_type, symbol, timestamp DESC)
     `);
 
     this.ready = true;
@@ -384,6 +405,39 @@ class PostgresStateStore {
     );
 
     return result.rows.map(rowToCandle);
+  }
+
+  async saveOrderBookLiquidity({ exchangeId, marketType, symbol, snapshot }) {
+    await this.init();
+    if (!snapshot) return { saved: 0, supported: true };
+
+    const timestamp = finiteNumberOrNull(snapshot.timestamp) || Date.now();
+    const id = `${exchangeId}:${marketType}:${symbol}:${timestamp}`;
+
+    await this.client.query(
+      `INSERT INTO order_book_liquidity_zones (
+        id, exchange, market_type, symbol, timestamp, mid_price, spread_percent, data, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+      ON CONFLICT (id)
+      DO UPDATE SET
+        mid_price = EXCLUDED.mid_price,
+        spread_percent = EXCLUDED.spread_percent,
+        data = EXCLUDED.data,
+        updated_at = now()`,
+      [
+        id,
+        exchangeId,
+        marketType,
+        symbol,
+        timestamp,
+        finiteNumberOrNull(snapshot.midPrice),
+        finiteNumberOrNull(snapshot.spreadPercent),
+        snapshot
+      ]
+    );
+
+    return { saved: 1, supported: true };
   }
 
   async close() {

@@ -13,6 +13,7 @@ function buildDashboardSnapshot(state) {
   const performance = getPerformanceState(state);
   const closedTrades = performance.closedTrades.slice(-50).reverse();
   const marketSnapshots = (state.research?.marketSnapshots || []).slice(-160);
+  const orderBookSnapshots = (state.research?.orderBookSnapshots || []).slice(-80);
   const signalDecisions = state.research?.signalDecisions || [];
 
   return {
@@ -22,6 +23,7 @@ function buildDashboardSnapshot(state) {
     closedTrades,
     paperTrades: performance.paperTrades.slice(-50).reverse(),
     marketSnapshots,
+    orderBookSnapshots,
     signalDecisions: signalDecisions.slice(-80),
     totals: {
       open: performance.openTrades.length,
@@ -167,6 +169,21 @@ function buildPriceSvg(points = [], decisions = []) {
   `;
 }
 
+function orderBookRow(snapshot) {
+  const bid = snapshot.nearestBidWall;
+  const ask = snapshot.nearestAskWall;
+  return `
+    <tr>
+      <td>${escapeHtml(snapshot.symbol || "-")}</td>
+      <td>${escapeHtml(snapshot.midPrice ?? "-")}</td>
+      <td>${escapeHtml(snapshot.spreadPercent?.toFixed ? snapshot.spreadPercent.toFixed(4) : snapshot.spreadPercent ?? "-")}%</td>
+      <td>${bid ? `<span class="badge success">${escapeHtml(bid.price)} / ${escapeHtml(Math.round(bid.notional))}</span>` : "-"}</td>
+      <td>${ask ? `<span class="badge danger">${escapeHtml(ask.price)} / ${escapeHtml(Math.round(ask.notional))}</span>` : "-"}</td>
+      <td>${escapeHtml(snapshot.at ? new Date(snapshot.at).toISOString() : "-")}</td>
+    </tr>
+  `;
+}
+
 function buildDashboardHtml(state, status) {
   const snapshot = buildDashboardSnapshot(state);
   const openRows = snapshot.openTrades.map(tradeRow).join("") || `<tr><td colspan="8">No open trades</td></tr>`;
@@ -174,6 +191,7 @@ function buildDashboardHtml(state, status) {
   const rejectedRows = (state.research?.signalDecisions || []).filter((item) => !item.accepted).slice(-20).reverse()
     .map((item) => `<tr><td>${escapeHtml(item.symbol || "-")}</td><td><span class="badge danger">${escapeHtml(item.reason || "-")}</span></td><td>${escapeHtml(new Date(item.at).toISOString())}</td></tr>`)
     .join("") || `<tr><td colspan="3">No rejected decisions</td></tr>`;
+  const orderBookRows = snapshot.orderBookSnapshots.slice(-20).reverse().map(orderBookRow).join("") || `<tr><td colspan="6">No order book liquidity data</td></tr>`;
   const scannerStatus = snapshot.runtime.paused ? "Paused" : "Running";
 
   return `<!doctype html>
@@ -353,6 +371,8 @@ function buildDashboardHtml(state, status) {
     <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>TF</th><th>Entry</th><th>Exit</th><th>R</th><th>Opened</th></tr></thead><tbody>${openRows}</tbody></table></div>
     <h2>Recent Candle Close</h2>
     <div class="chart-wrap">${buildPriceSvg(snapshot.marketSnapshots, snapshot.signalDecisions)}</div>
+    <h2>Order Book Liquidity Walls</h2>
+    <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Mid</th><th>Spread</th><th>Nearest Bid Wall</th><th>Nearest Ask Wall</th><th>Time</th></tr></thead><tbody>${orderBookRows}</tbody></table></div>
     <h2>Paper Equity Curve</h2>
     <div class="chart-wrap">${buildEquitySvg(snapshot.paperAccount?.equityCurve || [])}</div>
     <h2>Recent Closed Trades</h2>

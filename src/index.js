@@ -15,6 +15,7 @@ import {
   normalizeState,
   recordMarketSnapshot,
   recordLessonsFromClosedTrades,
+  recordOrderBookSnapshot,
   recordSignalDecision,
   updatePairState,
   updatePaperTradeOutcomes,
@@ -243,6 +244,135 @@ async function loadAnalysisCandles({ exchange, stateStore, symbol, timeframe = c
   }
 }
 
+function getAverageNotional(levels) {
+  const notionals = levels
+    .map(([price, amount]) => Number(price) * Number(amount))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (notionals.length === 0) return 0;
+  return notionals.reduce((sum, value) => sum + value, 0) / notionals.length;
+}
+
+function getLiquidityWalls({ levels, side, midPrice, averageNotional, cfg }) {
+  const minNotional = Math.max(Number(cfg.minWallNotional) || 0, averageNotional * cfg.wallMultiplier);
+  return levels
+    .map(([price, amount]) => {
+      const safePrice = Number(price);
+      const safeAmount = Number(amount);
+      const notional = safePrice * safeAmount;
+      const distancePercent = midPrice > 0 ? Math.abs(safePrice - midPrice) / midPrice * 100 : 0;
+      return {
+        side,
+        price: safePrice,
+        amount: safeAmount,
+        notional,
+        distancePercent
+      };
+    })
+    .filter((level) => (
+      Number.isFinite(level.price) &&
+      Number.isFinite(level.amount) &&
+      Number.isFinite(level.notional) &&
+      level.notional >= minNotional &&
+      level.distancePercent <= cfg.maxDistancePercent
+    ))
+    .sort((a, b) => b.notional - a.notional)
+    .slice(0, 10);
+}
+
+function summarizeOrderBook(orderBook, symbol) {
+  const cfg = config.orderBookLiquidity;
+  const bids = Array.isArray(orderBook?.bids) ? orderBook.bids.slice(0, cfg.depthLimit) : [];
+  const asks = Array.isArray(orderBook?.asks) ? orderBook.asks.slice(0, cfg.depthLimit) : [];
+  const bestBid = Number(bids[0]?.[0]);
+  const bestAsk = Number(asks[0]?.[0]);
+  const midPrice = Number.isFinite(bestBid) && Number.isFinite(bestAsk) ? (bestBid + bestAsk) / 2 : 0;
+  const spreadPercent = midPrice > 0 ? (bestAsk - bestBid) / midPrice * 100 : 0;
+  const bidAverage = getAverageNotional(bids);
+  const askAverage = getAverageNotional(asks);
+  const bidWalls = getLiquidityWalls({ levels: bids, side: "bid", midPrice, averageNotional: bidAverage, cfg });
+  const askWalls = getLiquidityWalls({ levels: asks, side: "ask", midPrice, averageNotional: askAverage, cfg });
+
+  return {
+    timestamp: orderBook?.timestamp || Date.now(),
+    symbol,
+    bestBid,
+    bestAsk,
+    midPrice,
+    spreadPercent,
+    depthLimit: cfg.depthLimit,
+    wallMultiplier: cfg.wallMultiplier,
+    maxDistancePercent: cfg.maxDistancePercent,
+    bidAverageNotional: bidAverage,
+    askAverageNotional: askAverage,
+    bidWalls,
+    askWalls,
+    nearestBidWall: bidWalls
+      .filter((wall) => wall.price < midPrice)
+      .sort((a, b) => b.price - a.price)[0] || null,
+    nearestAskWall: askWalls
+      .filter((wall) => wall.price > midPrice)
+      .sort((a, b) => a.price - b.price)[0] || null
+  };
+}
+
+async function fetchOrderBookLiquidity({ exchange, state, stateStore, symbol }) {
+  if (!config.orderBookLiquidity.enabled || typeof exchange.fetchOrderBook !== "function") return null;
+
+  try {
+    const orderBook = await withRetry(
+      () => exchange.fetchOrderBook(symbol, config.orderBookLiquidity.depthLimit),
+      {
+        retries: config.runtime.retryAttempts,
+        delayMs: config.runtime.retryDelayMs,
+        label: `fetchOrderBook ${symbol}`
+      }
+    );
+    const snapshot = summarizeOrderBook(orderBook, symbol);
+
+    recordOrderBookSnapshot(state, {
+      exchange: config.exchange.id,
+      marketType: config.exchange.marketType,
+      ...snapshot
+    }, config.orderBookLiquidity.stateLimit);
+
+    if (config.runtime.databaseUrl && config.orderBookLiquidity.storeEnabled) {
+      await stateStore.saveOrderBookLiquidity({
+        exchangeId: config.exchange.id,
+        marketType: config.exchange.marketType,
+        symbol,
+        snapshot
+      });
+    }
+
+    return snapshot;
+  } catch (error) {
+    logger.warn("order book liquidity failed", { symbol, error: error.message });
+    return null;
+  }
+}
+
+function evaluateOrderBookLiquidity(signal, snapshot) {
+  if (!config.orderBookLiquidity.filterEnabled || !signal || !snapshot) {
+    return { passes: true, reason: null, matched: null };
+  }
+
+  if (signal.direction === "BUY") {
+    const wall = snapshot.nearestAskWall;
+    if (wall && wall.price > signal.entry && wall.price < signal.tp1) {
+      return { passes: false, reason: "order_book_ask_wall_before_tp1", matched: wall };
+    }
+  }
+
+  if (signal.direction === "SELL") {
+    const wall = snapshot.nearestBidWall;
+    if (wall && wall.price < signal.entry && wall.price > signal.tp1) {
+      return { passes: false, reason: "order_book_bid_wall_before_tp1", matched: wall };
+    }
+  }
+
+  return { passes: true, reason: null, matched: null };
+}
+
 function getHigherTimeframeTrend(candles, strategyConfig) {
   if (!candles.length) return "NEUTRAL";
   const last = candles[candles.length - 1];
@@ -446,6 +576,7 @@ function hasBackupData(state) {
     performance.paperTrades,
     research.signalDecisions,
     research.marketSnapshots,
+    research.orderBookSnapshots,
     research.lessons
   ].some((items) => Array.isArray(items) && items.length > 0);
 }
@@ -508,6 +639,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const paperEnabled = runtime.paperEnabledOverride ?? config.paper.enabled;
 
   const candles = await loadAnalysisCandles({ exchange, stateStore, symbol });
+  const orderBookLiquidity = await fetchOrderBookLiquidity({ exchange, state, stateStore, symbol });
   const lastCandle = candles.at(-1);
   if (lastCandle) {
     recordMarketSnapshot(state, {
@@ -571,6 +703,12 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
     analysis.signal.candleWindowStart = candles[contextStartIndex]?.timestamp ?? null;
     analysis.signal.candleWindowEnd = candles.at(-1)?.timestamp ?? null;
     analysis.signal.candleWindowCount = candles.length;
+    analysis.signal.orderBookLiquidity = orderBookLiquidity ? {
+      midPrice: orderBookLiquidity.midPrice,
+      spreadPercent: orderBookLiquidity.spreadPercent,
+      nearestBidWall: orderBookLiquidity.nearestBidWall,
+      nearestAskWall: orderBookLiquidity.nearestAskWall
+    } : null;
 
     const marketDataFilter = await signalPassesMarketDataFilters(exchange, symbol, strategyConfig, analysis.signal);
     analysis.signal.marketDataFilters = marketDataFilter.metrics;
@@ -595,6 +733,20 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
         rejectedByLesson: true,
         lessonRejectReason: lessonFilter.reason,
         lessonMatched: lessonFilter.matched
+      };
+    }
+  }
+
+  if (analysis.hasSignal) {
+    const orderBookFilter = evaluateOrderBookLiquidity(analysis.signal, orderBookLiquidity);
+    analysis.signal.orderBookLiquidityFilter = orderBookFilter.matched;
+    if (!orderBookFilter.passes) {
+      analysis.hasSignal = false;
+      analysis.debug = {
+        ...analysis.debug,
+        rejectedByOrderBookLiquidity: true,
+        orderBookLiquidityRejectReason: orderBookFilter.reason,
+        orderBookLiquidityMatched: orderBookFilter.matched
       };
     }
   }
@@ -626,6 +778,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
       score: analysis.signal.score,
       rr: analysis.signal.rr,
       slRiskPercent: analysis.signal.slRiskPercent,
+      orderBookLiquidity: analysis.signal.orderBookLiquidity,
       strategyVersion: strategyConfig.version,
       configHash: getConfigHash({ exchange: config.exchange, strategy: strategyConfig, paper: config.paper }),
       debug: analysis.debug
@@ -670,6 +823,8 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
       higherTimeframeTrend: debug.higherTimeframeTrend,
       rejectedByMarketDataFilter: Boolean(debug.rejectedByMarketDataFilter),
       marketDataFilterReason: debug.marketDataFilterReason,
+      rejectedByOrderBookLiquidity: Boolean(debug.rejectedByOrderBookLiquidity),
+      orderBookLiquidityRejectReason: debug.orderBookLiquidityRejectReason,
       marketRegime: debug.marketRegime?.labels?.join(",")
     });
   } else {
@@ -683,6 +838,7 @@ function getRejectedReason(debug) {
   if (debug.rejectedByHigherTimeframe) return "higher_timeframe";
   if (debug.rejectedByMarketDataFilter) return debug.marketDataFilterReason || "market_data_filter";
   if (debug.rejectedByLesson) return debug.lessonRejectReason || "lesson_filter";
+  if (debug.rejectedByOrderBookLiquidity) return debug.orderBookLiquidityRejectReason || "order_book_liquidity";
   if (!debug.marketRegimeAllowed) return "market_regime";
   if (debug.buyQuality?.rejectionReasons?.length || debug.sellQuality?.rejectionReasons?.length) {
     return [...(debug.buyQuality?.rejectionReasons || []), ...(debug.sellQuality?.rejectionReasons || [])].join(",");

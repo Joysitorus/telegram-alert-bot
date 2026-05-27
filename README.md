@@ -18,6 +18,7 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 - Telegram command center dengan role admin/operator/viewer dan inline keyboard.
 - State storage lokal atau PostgreSQL.
 - Market candle warehouse di PostgreSQL untuk menyimpan candle tertutup, memperkuat lesson, replay, dan dashboard.
+- Order book liquidity zones gratis dari public order book exchange untuk membaca bid/ask wall terdekat.
 - Lesson learning untuk mencatat outcome sinyal dan menolak setup yang performanya buruk setelah sampel cukup.
 - Backup manual dan backup harian otomatis ke Telegram dalam format `.json.gz`.
 - State migration backup dan schema version.
@@ -35,6 +36,7 @@ Exchange public API
   -> candle tertutup
   -> upsert market_candles jika PostgreSQL aktif
   -> ambil candle dari database untuk analisis jika tersedia
+  -> fetch order book publik dan hitung bid/ask wall
   -> hitung indikator dan market context
   -> jalankan filter strategi dan risk guard
   -> cek lesson filter
@@ -47,6 +49,8 @@ Exchange public API
 Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL tersentuh dalam candle yang sama, lifecycle dihitung konservatif karena data OHLC tidak memberi urutan intrabar.
 
 Jika `DATABASE_URL` aktif, bot juga bisa menyimpan candle yang sudah diambil ke PostgreSQL agar data sinyal, lesson, replay, dan dashboard makin kuat. Candle tetap diambil dari exchange sebagai sumber awal, lalu di-upsert ke tabel `market_candles`.
+
+Bot juga bisa membaca order book publik gratis dari exchange untuk menghitung liquidity wall. Ini bukan liquidation heatmap asli, tetapi memberi konteks bid/ask wall terdekat yang bisa dipakai sebagai informasi sinyal atau filter opsional.
 
 ## Instalasi Lokal
 
@@ -491,6 +495,7 @@ bot_state          # state utama bot dalam JSONB
 bot_lessons        # lesson per closed signal/trade
 bot_lesson_stats   # agregasi statistik lesson
 market_candles     # candle tertutup untuk analisis/replay/dashboard
+order_book_liquidity_zones # snapshot bid/ask wall dari order book publik
 ```
 
 ### Market Candle Warehouse
@@ -523,6 +528,39 @@ market_candles
 - fetched_at
 ```
 
+### Order Book Liquidity Zones
+
+```env
+ORDER_BOOK_LIQUIDITY_ENABLED=true
+ORDER_BOOK_LIQUIDITY_STORE_ENABLED=true
+ORDER_BOOK_LIQUIDITY_FILTER_ENABLED=false
+ORDER_BOOK_DEPTH_LIMIT=100
+ORDER_BOOK_WALL_MULTIPLIER=3
+ORDER_BOOK_MAX_DISTANCE_PERCENT=2
+ORDER_BOOK_MIN_WALL_NOTIONAL=0
+ORDER_BOOK_STATE_LIMIT=1000
+```
+
+Fitur ini memakai `fetchOrderBook` CCXT untuk membaca order book publik. Bot menghitung rata-rata notional level bid/ask, lalu menandai wall jika notional level minimal `ORDER_BOOK_WALL_MULTIPLIER` kali rata-rata atau minimal `ORDER_BOOK_MIN_WALL_NOTIONAL`. Hanya wall dalam jarak `ORDER_BOOK_MAX_DISTANCE_PERCENT` dari mid price yang disimpan.
+
+Data yang dihasilkan:
+
+```text
+nearestBidWall
+- price
+- amount
+- notional
+- distancePercent
+
+nearestAskWall
+- price
+- amount
+- notional
+- distancePercent
+```
+
+Jika `ORDER_BOOK_LIQUIDITY_FILTER_ENABLED=true`, sinyal BUY bisa ditolak jika ask wall besar berada di antara entry dan TP1, dan sinyal SELL bisa ditolak jika bid wall besar berada di antara entry dan TP1. Default filter `false` agar fitur ini awalnya hanya menjadi konteks dan tidak mengubah agresivitas sinyal.
+
 Runtime guard:
 
 ```env
@@ -548,7 +586,7 @@ Endpoint:
 - `GET /dashboard.json` - snapshot dashboard.
 - `GET /metrics` - Prometheus metrics.
 
-Dashboard menampilkan status scanner, metric trade/paper, open trade, recent closed trade, rejected decision, paper equity curve, dan chart recent candle close dari snapshot yang tersimpan.
+Dashboard menampilkan status scanner, metric trade/paper, open trade, recent closed trade, rejected decision, paper equity curve, chart recent candle close dari snapshot yang tersimpan, dan tabel order book liquidity wall.
 
 Catatan: `health.js` hanya start server jika `HEALTHCHECK_ENABLED=true` atau `DASHBOARD_ENABLED=true`. Endpoint `/metrics` tersedia pada server yang sama.
 
@@ -634,6 +672,8 @@ CHECK_INTERVAL_SECONDS=300
 DATABASE_URL=...
 MARKET_CANDLES_STORE_ENABLED=true
 MARKET_CANDLES_USE_FOR_ANALYSIS=true
+ORDER_BOOK_LIQUIDITY_ENABLED=true
+ORDER_BOOK_LIQUIDITY_STORE_ENABLED=true
 BACKUP_EXPORT_ENABLED=true
 DAILY_BACKUP_ENABLED=true
 ```
@@ -735,6 +775,7 @@ PAPER_TRADING_MAX_DRAWDOWN_PERCENT=15
 - Pastikan `DASHBOARD_ENABLED=true`.
 - `Paper Equity Curve` baru terisi setelah paper trading aktif dan saldo/margin berubah.
 - `Recent Candle Close` memakai `research.marketSnapshots`; chart akan muncul setelah minimal dua scan menyimpan snapshot.
+- `Order Book Liquidity Walls` muncul setelah order book berhasil diambil dari exchange dan `ORDER_BOOK_LIQUIDITY_ENABLED=true`.
 - Jika memakai Railway, pastikan service punya public domain.
 
 ### Command Telegram tidak muncul atau tidak diproses

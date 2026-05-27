@@ -108,6 +108,17 @@ export const config = {
     replayLimit: toNumber(process.env.MARKET_CANDLES_REPLAY_LIMIT, 10000, { min: 250, max: 250000 })
   },
 
+  orderBookLiquidity: {
+    enabled: toBoolean(process.env.ORDER_BOOK_LIQUIDITY_ENABLED, true),
+    storeEnabled: toBoolean(process.env.ORDER_BOOK_LIQUIDITY_STORE_ENABLED, true),
+    filterEnabled: toBoolean(process.env.ORDER_BOOK_LIQUIDITY_FILTER_ENABLED, false),
+    depthLimit: toNumber(process.env.ORDER_BOOK_DEPTH_LIMIT, 100, { min: 5, max: 500 }),
+    wallMultiplier: toNumber(process.env.ORDER_BOOK_WALL_MULTIPLIER, 3, { min: 1, max: 100 }),
+    maxDistancePercent: toNumber(process.env.ORDER_BOOK_MAX_DISTANCE_PERCENT, 2, { min: 0.01, max: 100 }),
+    minWallNotional: toNumber(process.env.ORDER_BOOK_MIN_WALL_NOTIONAL, 0, { min: 0 }),
+    stateLimit: toNumber(process.env.ORDER_BOOK_STATE_LIMIT, 1000, { min: 100, max: 100000 })
+  },
+
   strategy: {
     emaFast: toNumber(process.env.EMA_FAST, 20, { min: 1, max: 500 }),
     emaMid: toNumber(process.env.EMA_MID, 50, { min: 1, max: 500 }),

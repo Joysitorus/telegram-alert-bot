@@ -41,6 +41,7 @@ export function createDefaultState() {
     research: {
       signalDecisions: [],
       marketSnapshots: [],
+      orderBookSnapshots: [],
       lessons: [],
       lessonStats: {}
     },
@@ -103,6 +104,7 @@ export function normalizeState(state) {
   if (!normalized.research) normalized.research = {};
   if (!Array.isArray(normalized.research.signalDecisions)) normalized.research.signalDecisions = [];
   if (!Array.isArray(normalized.research.marketSnapshots)) normalized.research.marketSnapshots = [];
+  if (!Array.isArray(normalized.research.orderBookSnapshots)) normalized.research.orderBookSnapshots = [];
   if (!Array.isArray(normalized.research.lessons)) normalized.research.lessons = [];
   if (!normalized.research.lessonStats || typeof normalized.research.lessonStats !== "object") normalized.research.lessonStats = {};
   if (!normalized.performance) normalized.performance = createDefaultPerformanceState();
@@ -784,6 +786,17 @@ export function recordMarketSnapshot(state, snapshot, limit = 2000) {
   });
   if (normalized.research.marketSnapshots.length > limit) {
     normalized.research.marketSnapshots = normalized.research.marketSnapshots.slice(-limit);
+  }
+}
+
+export function recordOrderBookSnapshot(state, snapshot, limit = 1000) {
+  const normalized = normalizeState(state);
+  normalized.research.orderBookSnapshots.push({
+    at: Date.now(),
+    ...snapshot
+  });
+  if (normalized.research.orderBookSnapshots.length > limit) {
+    normalized.research.orderBookSnapshots = normalized.research.orderBookSnapshots.slice(-limit);
   }
 }
 
