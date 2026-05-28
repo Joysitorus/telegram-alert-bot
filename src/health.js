@@ -329,49 +329,53 @@ function buildDashboardHtml(state, status) {
   <title>Crypto Alert Bot Dashboard</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f5f7fb;
-      --surface: #ffffff;
-      --surface-soft: #f8fafc;
-      --surface-strong: #eef2f7;
-      --border: #d8e0eb;
-      --text: #15202e;
-      --muted: #667085;
-      --faint: #98a2b3;
-      --cyan: #0e9384;
-      --blue: #2563eb;
-      --amber: #b7791f;
-      --red: #d92d20;
-      --green: #16803c;
-      --shadow: 0 14px 36px rgba(16, 24, 40, 0.08);
+      color-scheme: dark;
+      --bg: #080b12;
+      --surface: #111827;
+      --surface-soft: #0f1623;
+      --surface-strong: #182231;
+      --border: rgba(148, 163, 184, 0.2);
+      --text: #eef4f8;
+      --muted: #97a6ba;
+      --faint: #66758a;
+      --cyan: #2dd4bf;
+      --blue: #60a5fa;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --green: #4ade80;
+      --shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
     }
     * { box-sizing: border-box; }
+    html { height: 100%; }
     body {
       margin: 0;
       min-width: 320px;
+      height: 100%;
+      overflow: hidden;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--text);
-      background: var(--bg);
+      background:
+        radial-gradient(circle at top left, rgba(45, 212, 191, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(251, 191, 36, 0.08), transparent 24%),
+        var(--bg);
     }
     header {
       border-bottom: 1px solid var(--border);
-      background: rgba(255, 255, 255, 0.9);
+      background: rgba(8, 11, 18, 0.88);
       backdrop-filter: blur(14px);
-      position: sticky;
-      top: 0;
-      z-index: 2;
+      height: 72px;
     }
     .topbar {
-      max-width: 1240px;
-      margin: 0 auto;
-      padding: 22px 20px;
+      width: 100%;
+      height: 100%;
+      padding: 12px 18px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
     }
-    h1 { margin: 0; font-size: clamp(22px, 3vw, 34px); line-height: 1.05; letter-spacing: 0; }
-    .subtitle { margin-top: 8px; color: var(--muted); font-size: 14px; }
+    h1 { margin: 0; font-size: clamp(20px, 2.2vw, 26px); line-height: 1.05; letter-spacing: 0; }
+    .subtitle { margin-top: 6px; color: var(--muted); font-size: 13px; }
     .toolbar {
       display: flex;
       align-items: center;
@@ -387,11 +391,10 @@ function buildDashboardHtml(state, status) {
       border: 1px solid var(--border);
       border-radius: 8px;
       color: var(--text);
-      background: var(--surface);
+      background: rgba(17, 24, 39, 0.82);
       text-decoration: none;
       font-size: 13px;
       font-weight: 700;
-      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
     }
     .status-pill {
       display: inline-flex;
@@ -401,31 +404,38 @@ function buildDashboardHtml(state, status) {
       padding: 0 12px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--surface);
+      background: rgba(17, 24, 39, 0.82);
       color: var(--text);
       white-space: nowrap;
       font-weight: 700;
-      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
     }
     .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); box-shadow: 0 0 18px var(--green); }
     .dot.paused { background: var(--amber); box-shadow: 0 0 18px var(--amber); }
-    main { max-width: 1240px; margin: 0 auto; padding: 22px 20px 40px; position: relative; }
-    h2 { margin: 30px 0 12px; font-size: 16px; line-height: 1.2; letter-spacing: 0; color: var(--text); }
+    main.dashboard-shell {
+      height: calc(100dvh - 72px);
+      padding: 12px;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      gap: 12px;
+      overflow: hidden;
+    }
+    h2 { margin: 0; font-size: 15px; line-height: 1.2; letter-spacing: 0; color: var(--text); }
     .overview {
       display: grid;
       grid-template-columns: 1.35fr 0.65fr;
-      gap: 14px;
-      margin-bottom: 14px;
+      gap: 12px;
+      min-height: 78px;
     }
     .panel {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--surface);
+      background: rgba(17, 24, 39, 0.88);
       box-shadow: var(--shadow);
-      padding: 18px;
+      padding: 12px;
+      min-width: 0;
     }
     .panel-title {
-      margin: 0 0 12px;
+      margin: 0 0 8px;
       font-size: 13px;
       color: var(--muted);
       text-transform: uppercase;
@@ -434,69 +444,119 @@ function buildDashboardHtml(state, status) {
     .status-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      gap: 8px;
     }
     .status-item {
-      min-height: 74px;
+      min-height: 50px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--surface-soft);
-      padding: 12px;
+      padding: 9px;
     }
     .status-item span,
     .metric span {
       display: block;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
       font-weight: 800;
     }
     .status-item strong {
       display: block;
-      margin-top: 8px;
-      font-size: 18px;
+      margin-top: 5px;
+      font-size: 15px;
       line-height: 1.15;
       overflow-wrap: anywhere;
     }
     .notice {
       border-left: 4px solid var(--blue);
       background: var(--surface-soft);
-      padding: 12px;
+      padding: 9px 10px;
       border-radius: 8px;
       color: var(--muted);
-      line-height: 1.45;
-      min-height: 74px;
+      line-height: 1.35;
+      min-height: 50px;
+      max-height: 52px;
+      overflow: auto;
       overflow-wrap: anywhere;
     }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(132px, 1fr));
+      gap: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 2px;
+      scrollbar-width: thin;
+    }
     .metric {
-      min-height: 108px;
+      min-height: 72px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 16px;
-      background: var(--surface);
+      padding: 11px;
+      background: rgba(17, 24, 39, 0.88);
       box-shadow: var(--shadow);
+      min-width: 132px;
     }
     .metric strong {
       display: block;
-      margin-top: 10px;
-      font-size: clamp(20px, 4vw, 30px);
+      margin-top: 7px;
+      font-size: clamp(18px, 2.2vw, 24px);
       line-height: 1.05;
       overflow-wrap: anywhere;
     }
-    .table-wrap, .chart-wrap {
-      overflow-x: auto;
+    .main-grid {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr) minmax(0, 0.9fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 0.95fr);
+      gap: 12px;
+      grid-template-areas:
+        "open price orderbook"
+        "closed equity rejected";
+    }
+    .dashboard-card {
+      min-width: 0;
+      min-height: 0;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--surface);
+      background: rgba(17, 24, 39, 0.88);
       box-shadow: var(--shadow);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
+    }
+    .card-open { grid-area: open; }
+    .card-price { grid-area: price; }
+    .card-orderbook { grid-area: orderbook; }
+    .card-closed { grid-area: closed; }
+    .card-equity { grid-area: equity; }
+    .card-rejected { grid-area: rejected; }
+    .card-head {
+      min-height: 44px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(24, 34, 49, 0.62);
+    }
+    .card-note {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .table-wrap, .chart-wrap {
+      min-height: 0;
+      overflow: auto;
     }
     table { width: 100%; min-width: 820px; border-collapse: collapse; }
-    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid rgba(148, 163, 184, 0.14); font-size: 13px; vertical-align: middle; }
-    th { color: var(--muted); background: var(--surface-soft); font-size: 12px; text-transform: uppercase; position: sticky; top: 0; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid rgba(148, 163, 184, 0.14); font-size: 12px; vertical-align: middle; }
+    th { color: var(--muted); background: var(--surface-soft); font-size: 11px; text-transform: uppercase; position: sticky; top: 0; z-index: 1; }
     td { color: var(--text); }
     tr:last-child td { border-bottom: 0; }
-    tr:hover td { background: #fbfcfe; }
+    tr:hover td { background: rgba(148, 163, 184, 0.06); }
     .badge, .side, .liquidity {
       display: inline-flex;
       align-items: center;
@@ -508,10 +568,10 @@ function buildDashboardHtml(state, status) {
       white-space: nowrap;
       border: 1px solid currentColor;
     }
-    .success, .buy { color: var(--green); background: #ecfdf3; }
-    .danger, .sell { color: var(--red); background: #fef3f2; }
-    .warn { color: var(--amber); background: #fffaeb; }
-    .neutral { color: var(--blue); background: #eff6ff; }
+    .success, .buy { color: var(--green); background: rgba(74, 222, 128, 0.12); }
+    .danger, .sell { color: var(--red); background: rgba(251, 113, 133, 0.12); }
+    .warn { color: var(--amber); background: rgba(251, 191, 36, 0.12); }
+    .neutral { color: var(--blue); background: rgba(96, 165, 250, 0.12); }
     .cell-muted {
       display: block;
       margin-top: 3px;
@@ -531,14 +591,14 @@ function buildDashboardHtml(state, status) {
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--faint);
-      background: var(--surface-soft);
+      background: rgba(15, 22, 35, 0.9);
       font-size: 11px;
       font-weight: 800;
     }
     .target-progress .hit {
       color: var(--green);
       border-color: rgba(22, 128, 60, 0.35);
-      background: #ecfdf3;
+      background: rgba(74, 222, 128, 0.12);
     }
     .liquidity {
       gap: 8px;
@@ -549,11 +609,11 @@ function buildDashboardHtml(state, status) {
       font-size: 11px;
       font-weight: 800;
     }
-    .chart-wrap { padding: 18px; }
-    .chart { width: 100%; height: 220px; display: block; }
-    .chart-grid { fill: none; stroke: rgba(102, 112, 133, 0.2); stroke-width: 1; }
-    .marker-buy { fill: var(--green); stroke: #ffffff; stroke-width: 3; }
-    .marker-sell { fill: var(--red); stroke: #ffffff; stroke-width: 3; }
+    .chart-wrap { padding: 12px; }
+    .chart { width: 100%; height: 100%; min-height: 180px; display: block; }
+    .chart-grid { fill: none; stroke: rgba(148, 163, 184, 0.18); stroke-width: 1; }
+    .marker-buy { fill: var(--green); stroke: #080b12; stroke-width: 3; }
+    .marker-sell { fill: var(--red); stroke: #080b12; stroke-width: 3; }
     .empty-chart {
       min-height: 160px;
       display: grid;
@@ -561,7 +621,7 @@ function buildDashboardHtml(state, status) {
       color: var(--muted);
       border: 1px dashed rgba(148, 163, 184, 0.28);
       border-radius: 8px;
-      background: var(--surface-soft);
+      background: rgba(15, 22, 35, 0.9);
     }
     .empty-row {
       min-height: 44px;
@@ -570,14 +630,18 @@ function buildDashboardHtml(state, status) {
       color: var(--muted);
     }
     @media (max-width: 720px) {
-      .topbar { align-items: flex-start; flex-direction: column; padding: 18px 14px; }
-      main { padding: 16px 14px 30px; }
+      body { height: auto; min-height: 100%; overflow: auto; }
+      header { height: auto; }
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px; }
+      main.dashboard-shell { height: auto; min-height: calc(100dvh - 112px); overflow: visible; padding: 12px; }
       .toolbar { width: 100%; justify-content: flex-start; }
       .overview { grid-template-columns: 1fr; }
       .status-grid { grid-template-columns: 1fr; }
-      .metrics { grid-template-columns: 1fr 1fr; }
-      .metric { min-height: 94px; padding: 13px; }
-      h2 { margin-top: 24px; }
+      .metrics { grid-template-columns: 1fr 1fr; overflow: visible; }
+      .metric { min-height: 78px; padding: 12px; }
+      .main-grid { grid-template-columns: 1fr; grid-template-rows: none; grid-template-areas: "open" "price" "orderbook" "equity" "closed" "rejected"; }
+      .dashboard-card { min-height: 320px; }
+      .card-price, .card-equity { min-height: 280px; }
     }
     @media (max-width: 460px) {
       .metrics { grid-template-columns: 1fr; }
@@ -600,7 +664,7 @@ function buildDashboardHtml(state, status) {
       </div>
     </div>
   </header>
-  <main>
+  <main class="dashboard-shell">
     <section class="overview">
       <div class="panel">
         <p class="panel-title">Scanner Health</p>
@@ -631,18 +695,32 @@ function buildDashboardHtml(state, status) {
       <div class="metric"><span>Signals Accepted</span><strong>${escapeHtml(stats.accepted)}</strong></div>
       <div class="metric"><span>Signals Rejected</span><strong>${escapeHtml(stats.rejected)}</strong></div>
     </section>
-    <h2>Open Trades</h2>
-    <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP2</th><th>Exit</th><th>Targets</th><th>R</th><th>Opened</th></tr></thead><tbody>${openRows}</tbody></table></div>
-    <h2>Recent Candle Close</h2>
-    <div class="chart-wrap">${buildPriceSvg(snapshot.marketSnapshots, snapshot.signalDecisions)}</div>
-    <h2>Order Book Liquidity Walls</h2>
-    <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Mid</th><th>Spread</th><th>Nearest Bid Wall</th><th>Nearest Ask Wall</th><th>Time</th></tr></thead><tbody>${orderBookRows}</tbody></table></div>
-    <h2>Paper Equity Curve</h2>
-    <div class="chart-wrap">${buildEquitySvg(snapshot.paperAccount?.equityCurve || [])}</div>
-    <h2>Recent Closed Trades</h2>
-    <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP2</th><th>Exit</th><th>Targets</th><th>R</th><th>Opened</th></tr></thead><tbody>${closedRows}</tbody></table></div>
-    <h2>Recent Rejected Decisions</h2>
-    <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Reason</th><th>Time</th></tr></thead><tbody>${rejectedRows}</tbody></table></div>
+    <section class="main-grid">
+      <section class="dashboard-card card-open">
+        <div class="card-head"><h2>Open Trades</h2><span class="card-note">${escapeHtml(snapshot.openTrades.length)} active</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP2</th><th>Exit</th><th>Targets</th><th>R</th><th>Opened</th></tr></thead><tbody>${openRows}</tbody></table></div>
+      </section>
+      <section class="dashboard-card card-price">
+        <div class="card-head"><h2>Recent Candle Close</h2><span class="card-note">${escapeHtml(snapshot.marketSnapshots.length)} points</span></div>
+        <div class="chart-wrap">${buildPriceSvg(snapshot.marketSnapshots, snapshot.signalDecisions)}</div>
+      </section>
+      <section class="dashboard-card card-orderbook">
+        <div class="card-head"><h2>Liquidity Walls</h2><span class="card-note">order book</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Mid</th><th>Spread</th><th>Nearest Bid Wall</th><th>Nearest Ask Wall</th><th>Time</th></tr></thead><tbody>${orderBookRows}</tbody></table></div>
+      </section>
+      <section class="dashboard-card card-closed">
+        <div class="card-head"><h2>Recent Closed Trades</h2><span class="card-note">last 50</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP2</th><th>Exit</th><th>Targets</th><th>R</th><th>Opened</th></tr></thead><tbody>${closedRows}</tbody></table></div>
+      </section>
+      <section class="dashboard-card card-equity">
+        <div class="card-head"><h2>Paper Equity Curve</h2><span class="card-note">${escapeHtml((snapshot.paperAccount?.equityCurve || []).length)} points</span></div>
+        <div class="chart-wrap">${buildEquitySvg(snapshot.paperAccount?.equityCurve || [])}</div>
+      </section>
+      <section class="dashboard-card card-rejected">
+        <div class="card-head"><h2>Rejected Decisions</h2><span class="card-note">last 20</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Reason</th><th>Time</th></tr></thead><tbody>${rejectedRows}</tbody></table></div>
+      </section>
+    </section>
   </main>
 </body>
 </html>`;
