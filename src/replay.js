@@ -1,4 +1,5 @@
 import ccxt from "ccxt";
+import { fileURLToPath } from "url";
 import { config, getStrategyConfigForSymbol } from "./config.js";
 import { createStateStore } from "./storage.js";
 import { analyzeSymbol } from "./strategy.js";
@@ -46,25 +47,111 @@ async function loadReplayCandlesFromDatabase(stateStore, exchange, symbol) {
   });
 }
 
-function summarize(state) {
-  const paperTrades = getPerformanceState(state).paperTrades;
-  const closed = paperTrades.filter((trade) => trade.outcome);
-  const wins = closed.filter((trade) => trade.outcome === "TP3" || trade.tp2Hit).length;
-  const losses = closed.filter((trade) => trade.outcome === "SL").length;
-  const liquidations = closed.filter((trade) => trade.outcome === "LIQUIDATED").length;
-  const rSum = closed.reduce((sum, trade) => sum + (Number(trade.realizedR) || 0), 0);
-  const pnlSum = closed.reduce((sum, trade) => sum + (Number(trade.realizedPnlUsdt) || 0), 0);
+function roundMetric(value, digits = 4) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Number(number.toFixed(digits));
+}
+
+function incrementCounter(counter, key, by = 1) {
+  const safeKey = key || "unknown";
+  counter[safeKey] = (counter[safeKey] || 0) + by;
+}
+
+function getTradeWin(trade) {
+  return trade.outcome === "TP3" || trade.tp2Hit || Number(trade.realizedR) > 0;
+}
+
+function getMaxDrawdownFromEquityCurve(equityCurve = []) {
+  let peak = null;
+  let maxDrawdownUsdt = 0;
+  let maxDrawdownPercent = 0;
+
+  for (const point of equityCurve) {
+    const balance = Number(point.balance);
+    if (!Number.isFinite(balance)) continue;
+
+    if (peak === null || balance > peak) peak = balance;
+    if (!peak || peak <= 0) continue;
+
+    const drawdownUsdt = peak - balance;
+    const drawdownPercent = drawdownUsdt / peak * 100;
+    maxDrawdownUsdt = Math.max(maxDrawdownUsdt, drawdownUsdt);
+    maxDrawdownPercent = Math.max(maxDrawdownPercent, drawdownPercent);
+  }
 
   return {
-    totalTrades: paperTrades.length,
+    maxDrawdownUsdt: roundMetric(maxDrawdownUsdt, 4),
+    maxDrawdownPercent: roundMetric(maxDrawdownPercent, 4)
+  };
+}
+
+function summarizeTrades(trades) {
+  const closed = trades.filter((trade) => trade.outcome);
+  const wins = closed.filter(getTradeWin).length;
+  const losses = closed.filter((trade) => trade.outcome === "SL").length;
+  const liquidations = closed.filter((trade) => trade.outcome === "LIQUIDATED").length;
+  const totalR = closed.reduce((sum, trade) => sum + (Number(trade.realizedR) || 0), 0);
+  const realizedPnlUsdt = closed.reduce((sum, trade) => sum + (Number(trade.realizedPnlUsdt) || 0), 0);
+  const outcomes = {};
+
+  for (const trade of closed) {
+    incrementCounter(outcomes, trade.outcome);
+  }
+
+  return {
+    totalTrades: trades.length,
     closedTrades: closed.length,
-    openTrades: paperTrades.length - closed.length,
+    openTrades: trades.length - closed.length,
     wins,
     losses,
     liquidations,
-    winrate: closed.length ? wins / closed.length * 100 : 0,
-    averageR: closed.length ? rSum / closed.length : 0,
-    realizedPnlUsdt: pnlSum
+    winrate: roundMetric(closed.length ? wins / closed.length * 100 : 0, 2),
+    averageR: roundMetric(closed.length ? totalR / closed.length : 0, 4),
+    totalR: roundMetric(totalR, 4),
+    realizedPnlUsdt: roundMetric(realizedPnlUsdt, 4),
+    outcomes
+  };
+}
+
+function getRejectedReasonSummary(state) {
+  const account = getPerformanceState(state).paperAccount || {};
+  const summary = {};
+
+  if (account.lastRejectReason && account.rejectedTrades > 0) {
+    summary[account.lastRejectReason] = Number(account.rejectedTrades) || 0;
+  }
+
+  return {
+    total: Number(account.rejectedTrades) || 0,
+    reasons: summary
+  };
+}
+
+export function summarizeReplay(state) {
+  const performance = getPerformanceState(state);
+  const paperTrades = performance.paperTrades;
+  const paperAccount = performance.paperAccount || {};
+  const bySymbol = {};
+
+  for (const trade of paperTrades) {
+    const symbol = trade.symbol || "unknown";
+    if (!bySymbol[symbol]) bySymbol[symbol] = [];
+    bySymbol[symbol].push(trade);
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    global: {
+      ...summarizeTrades(paperTrades),
+      ...getMaxDrawdownFromEquityCurve(paperAccount.equityCurve || []),
+      rejected: getRejectedReasonSummary(state)
+    },
+    bySymbol: Object.fromEntries(
+      Object.entries(bySymbol)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([symbol, trades]) => [symbol, summarizeTrades(trades)])
+    )
   };
 }
 
@@ -119,11 +206,13 @@ async function main() {
     updatePaperTradeOutcomes(state, key, candles, lifecycleOptions);
   }
 
-  console.log(JSON.stringify(summarize(state), null, 2));
+  console.log(JSON.stringify(summarizeReplay(state), null, 2));
   if (stateStore) await stateStore.close();
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

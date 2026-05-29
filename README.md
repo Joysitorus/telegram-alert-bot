@@ -639,6 +639,30 @@ REPLAY_UNTIL=2026-05-26T00:00:00Z
 
 `npm run replay:db` membutuhkan `DATABASE_URL` dan data candle yang sudah terkumpul di `market_candles`. Jika tabel belum berisi candle untuk symbol/timeframe yang dipilih, replay DB akan melewati symbol tersebut.
 
+Output replay berupa JSON dengan:
+
+- `global` - total trade, closed/open trade, wins, losses, liquidations, winrate, average R, total R, realized PnL USDT, max drawdown, outcome breakdown, dan rejected paper trade summary.
+- `bySymbol` - breakdown metrik yang sama per symbol.
+
+Contoh field penting:
+
+```json
+{
+  "global": {
+    "totalTrades": 12,
+    "closedTrades": 10,
+    "winrate": 40,
+    "averageR": 0.35,
+    "totalR": 3.5,
+    "maxDrawdownPercent": 8.2,
+    "outcomes": { "TP3": 4, "SL": 6 }
+  },
+  "bySymbol": {
+    "BTC/USDT:USDT": { "closedTrades": 5, "winrate": 60, "totalR": 2.1 }
+  }
+}
+```
+
 Syntax check:
 
 ```bash

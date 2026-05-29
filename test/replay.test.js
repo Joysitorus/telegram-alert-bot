@@ -1,0 +1,73 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createDefaultState, getPerformanceState } from "../src/state.js";
+import { summarizeReplay } from "../src/replay.js";
+
+function paperTrade(overrides = {}) {
+  return {
+    symbol: "BTC/USDT:USDT",
+    outcome: "TP3",
+    tp2Hit: true,
+    realizedR: 2,
+    realizedPnlUsdt: 10,
+    ...overrides
+  };
+}
+
+test("summarizeReplay reports global and per-symbol metrics", () => {
+  const state = createDefaultState();
+  const performance = getPerformanceState(state);
+  performance.paperTrades = [
+    paperTrade({ symbol: "BTC/USDT:USDT", outcome: "TP3", tp2Hit: true, realizedR: 3, realizedPnlUsdt: 15 }),
+    paperTrade({ symbol: "BTC/USDT:USDT", outcome: "SL", tp2Hit: false, realizedR: -1, realizedPnlUsdt: -5 }),
+    paperTrade({ symbol: "ETH/USDT:USDT", outcome: "LIQUIDATED", tp2Hit: false, realizedR: -1.5, realizedPnlUsdt: -8 }),
+    paperTrade({ symbol: "ETH/USDT:USDT", outcome: null, tp2Hit: false, realizedR: 0, realizedPnlUsdt: 0 })
+  ];
+  performance.paperAccount = {
+    rejectedTrades: 2,
+    lastRejectReason: "insufficient_balance",
+    equityCurve: [
+      { balance: 100 },
+      { balance: 120 },
+      { balance: 90 },
+      { balance: 110 }
+    ]
+  };
+
+  const summary = summarizeReplay(state);
+
+  assert.equal(summary.global.totalTrades, 4);
+  assert.equal(summary.global.closedTrades, 3);
+  assert.equal(summary.global.openTrades, 1);
+  assert.equal(summary.global.wins, 1);
+  assert.equal(summary.global.losses, 1);
+  assert.equal(summary.global.liquidations, 1);
+  assert.equal(summary.global.winrate, 33.33);
+  assert.equal(summary.global.averageR, 0.1667);
+  assert.equal(summary.global.totalR, 0.5);
+  assert.equal(summary.global.realizedPnlUsdt, 2);
+  assert.deepEqual(summary.global.outcomes, { TP3: 1, SL: 1, LIQUIDATED: 1 });
+  assert.equal(summary.global.maxDrawdownUsdt, 30);
+  assert.equal(summary.global.maxDrawdownPercent, 25);
+  assert.deepEqual(summary.global.rejected, {
+    total: 2,
+    reasons: { insufficient_balance: 2 }
+  });
+
+  assert.equal(summary.bySymbol["BTC/USDT:USDT"].closedTrades, 2);
+  assert.equal(summary.bySymbol["BTC/USDT:USDT"].winrate, 50);
+  assert.equal(summary.bySymbol["BTC/USDT:USDT"].totalR, 2);
+  assert.equal(summary.bySymbol["ETH/USDT:USDT"].openTrades, 1);
+  assert.equal(summary.bySymbol["ETH/USDT:USDT"].liquidations, 1);
+});
+
+test("summarizeReplay handles empty replay state", () => {
+  const summary = summarizeReplay(createDefaultState());
+
+  assert.equal(summary.global.totalTrades, 0);
+  assert.equal(summary.global.winrate, 0);
+  assert.equal(summary.global.averageR, 0);
+  assert.equal(summary.global.maxDrawdownPercent, 0);
+  assert.deepEqual(summary.global.rejected, { total: 0, reasons: {} });
+  assert.deepEqual(summary.bySymbol, {});
+});
