@@ -107,6 +107,8 @@ npm start       # menjalankan scanner normal
 npm run once    # scan satu kali lalu exit
 npm run replay  # replay baseline dari candle exchange
 npm run replay:db # replay dari candle PostgreSQL market_candles
+npm run replay:sweep # parameter sweep dari candle exchange
+npm run replay:sweep:db # parameter sweep dari candle PostgreSQL market_candles
 npm run check   # syntax check file JS utama
 npm test        # menjalankan test Node.js
 ```
@@ -636,6 +638,11 @@ REPLAY_SOURCE=database
 REPLAY_SINCE=2026-05-01T00:00:00Z
 REPLAY_UNTIL=2026-05-26T00:00:00Z
 REPLAY_WALK_FORWARD_RATIO=0.7
+REPLAY_SWEEP_ENABLED=false
+REPLAY_SWEEP_MAX_CONFIGS=120
+REPLAY_SWEEP_TOP=10
+REPLAY_SWEEP_MIN_TEST_TRADES=3
+REPLAY_SWEEP_SPACE_JSON=
 ```
 
 `npm run replay:db` membutuhkan `DATABASE_URL` dan data candle yang sudah terkumpul di `market_candles`. Jika tabel belum berisi candle untuk symbol/timeframe yang dipilih, replay DB akan melewati symbol tersebut.
@@ -645,6 +652,26 @@ Output replay berupa JSON dengan:
 - `global` - total trade, closed/open trade, wins, losses, liquidations, winrate, average R, total R, realized PnL USDT, max drawdown, outcome breakdown, dan rejected paper trade summary.
 - `bySymbol` - breakdown metrik yang sama per symbol.
 - `walkForward` - split train/test per symbol berbasis urutan waktu candle. Default `REPLAY_WALK_FORWARD_RATIO=0.7`, yaitu 70% candle awal untuk training/kalibrasi dan 30% candle akhir untuk validasi.
+
+Parameter sweep kompleks:
+
+```bash
+npm run replay:sweep
+npm run replay:sweep:db
+```
+
+Sweep memakai grid terbatas dan cached candle agar candle tidak di-fetch ulang untuk setiap konfigurasi. Default search space mencakup `MIN_CONFIRM`, `MIN_RR`, `ENTRY_MODE`, `MIN_VOLUME_RATIO`, `MAX_ENTRY_WICK_PERCENT`, `MIN_BREAKOUT_ATR`, `MIN_CANDLE_BODY_PERCENT`, dan `REJECT_FALLBACK_LIQUIDITY_TARGET`. Jika kombinasi terlalu banyak, `REPLAY_SWEEP_MAX_CONFIGS` membatasi jumlah konfigurasi yang dievaluasi secara deterministik.
+
+Custom search space bisa diisi dengan env JSON. Key boleh memakai nama env atau nama config internal:
+
+```env
+REPLAY_SWEEP_SPACE_JSON={"MIN_CONFIRM":[5,6,7],"MIN_RR":[2,2.5,3],"ENTRY_MODE":["breakout_close","pullback_trend"],"MIN_VOLUME_RATIO":[0,1.2],"MAX_ENTRY_WICK_PERCENT":[25,35]}
+REPLAY_SWEEP_MAX_CONFIGS=120
+REPLAY_SWEEP_TOP=10
+REPLAY_SWEEP_MIN_TEST_TRADES=3
+```
+
+Ranking sweep memakai skor komposit yang lebih menekankan performa test/OOS, lalu memberi penalti pada drawdown R, decay train-to-test, dan jumlah closed trade test yang terlalu kecil. Output juga menandai flag seperti `low_test_trade_count`, `train_positive_test_nonpositive`, `large_train_test_decay`, dan `drawdown_exceeds_test_edge`.
 
 Contoh field penting:
 

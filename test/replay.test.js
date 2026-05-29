@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDefaultState, getPerformanceState } from "../src/state.js";
-import { summarizeReplay } from "../src/replay.js";
+import { runReplaySweep, summarizeReplay } from "../src/replay.js";
 
 function paperTrade(overrides = {}) {
   return {
@@ -109,4 +109,49 @@ test("summarizeReplay reports walk-forward train and test performance", () => {
   assert.equal(summary.walkForward.global.comparison.averageRDelta, 1);
   assert.equal(summary.walkForward.global.comparison.closedTradeDelta, -1);
   assert.equal(summary.walkForward.global.unassignedTrades, 0);
+});
+
+test("runReplaySweep builds bounded ranking output from custom search space", () => {
+  const previous = {
+    REPLAY_SWEEP_SPACE_JSON: process.env.REPLAY_SWEEP_SPACE_JSON,
+    REPLAY_SWEEP_MAX_CONFIGS: process.env.REPLAY_SWEEP_MAX_CONFIGS,
+    REPLAY_SWEEP_TOP: process.env.REPLAY_SWEEP_TOP,
+    REPLAY_SWEEP_MIN_TEST_TRADES: process.env.REPLAY_SWEEP_MIN_TEST_TRADES
+  };
+
+  try {
+    process.env.REPLAY_SWEEP_SPACE_JSON = JSON.stringify({
+      MIN_CONFIRM: [5, 6],
+      MIN_RR: [2],
+      ENTRY_MODE: ["breakout_close"],
+      MIN_VOLUME_RATIO: [0],
+      MAX_ENTRY_WICK_PERCENT: [35]
+    });
+    process.env.REPLAY_SWEEP_MAX_CONFIGS = "3";
+    process.env.REPLAY_SWEEP_TOP = "2";
+    process.env.REPLAY_SWEEP_MIN_TEST_TRADES = "1";
+
+    const candles = Array.from({ length: 20 }, (_, index) => ({
+      timestamp: (index + 1) * 1_000,
+      open: 1,
+      high: 1,
+      low: 1,
+      close: 1,
+      volume: 1
+    }));
+    const output = runReplaySweep({ "BTC/USDT:USDT": candles }, { trainRatio: 0.7 });
+
+    assert.equal(output.method, "bounded_grid_sweep_with_walk_forward_ranking");
+    assert.equal(output.totalCombinations, 2);
+    assert.ok(output.evaluatedCombinations <= 3);
+    assert.equal(output.ranking.length, Math.min(2, output.evaluatedCombinations));
+    assert.ok(output.ranking[0].parameters.minConfirm);
+    assert.ok(Array.isArray(output.ranking[0].flags));
+    assert.equal(output.minTestTrades, 1);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });

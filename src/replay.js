@@ -1,6 +1,6 @@
 import ccxt from "ccxt";
 import { fileURLToPath } from "url";
-import { config, getStrategyConfigForSymbol } from "./config.js";
+import { config, getConfigHash, getStrategyConfigForSymbol } from "./config.js";
 import { createStateStore } from "./storage.js";
 import { analyzeSymbol } from "./strategy.js";
 import {
@@ -11,6 +11,32 @@ import {
   updatePairState,
   updatePaperTradeOutcomes
 } from "./state.js";
+import { parseJson, toBoolean, toNumber } from "./utils.js";
+
+const sweepKeyAliases = {
+  MIN_CONFIRM: "minConfirm",
+  MIN_RR: "minRR",
+  ENTRY_MODE: "entryMode",
+  MIN_VOLUME_RATIO: "minVolumeRatio",
+  MAX_ENTRY_WICK_PERCENT: "maxEntryWickPercent",
+  MIN_BREAKOUT_ATR: "minBreakoutAtr",
+  MAX_BREAKOUT_EXTENSION_ATR: "maxBreakoutExtensionAtr",
+  MIN_CANDLE_BODY_PERCENT: "minCandleBodyPercent",
+  REJECT_FALLBACK_LIQUIDITY_TARGET: "rejectFallbackLiquidityTarget",
+  REQUIRE_ORDER_BLOCK: "requireOrderBlock",
+  MARKET_REGIME_FILTER: "marketRegimeFilter"
+};
+
+const defaultSweepSearchSpace = {
+  minConfirm: [5, 6, 7],
+  minRR: [2, 2.5, 3, 4],
+  entryMode: ["breakout_close", "breakout_retest", "pullback_trend"],
+  minVolumeRatio: [0, 1.2, 1.5],
+  maxEntryWickPercent: [25, 35, 50],
+  minBreakoutAtr: [0, 0.15],
+  minCandleBodyPercent: [0, 45],
+  rejectFallbackLiquidityTarget: [false, true]
+};
 
 function toCandle(raw) {
   return {
@@ -290,6 +316,185 @@ function getReplayWalkForwardRatio() {
   return clampWalkForwardRatio(process.env.REPLAY_WALK_FORWARD_RATIO ?? process.env.REPLAY_TRAIN_RATIO ?? 0.7);
 }
 
+function normalizeSweepKey(key) {
+  return sweepKeyAliases[key] || sweepKeyAliases[String(key).toUpperCase()] || key;
+}
+
+function normalizeSweepSearchSpace(input) {
+  const normalized = {};
+
+  for (const [rawKey, rawValues] of Object.entries(input || {})) {
+    const key = normalizeSweepKey(rawKey);
+    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+    const deduped = [];
+
+    for (const value of values) {
+      const signature = JSON.stringify(value);
+      if (!deduped.some((item) => JSON.stringify(item) === signature)) {
+        deduped.push(value);
+      }
+    }
+
+    if (deduped.length > 0) normalized[key] = deduped;
+  }
+
+  return normalized;
+}
+
+function getSweepSearchSpace() {
+  const envSearchSpace = normalizeSweepSearchSpace(parseJson(process.env.REPLAY_SWEEP_SPACE_JSON, null));
+  if (Object.keys(envSearchSpace).length > 0) return envSearchSpace;
+  return normalizeSweepSearchSpace(defaultSweepSearchSpace);
+}
+
+function cartesianProduct(searchSpace) {
+  const entries = Object.entries(searchSpace);
+  let combinations = [{}];
+
+  for (const [key, values] of entries) {
+    combinations = combinations.flatMap((combo) => values.map((value) => ({
+      ...combo,
+      [key]: value
+    })));
+  }
+
+  return combinations;
+}
+
+function getSweepConfigId(parameters, index) {
+  const hash = getConfigHash(parameters).slice(0, 8);
+  return `sweep_${String(index + 1).padStart(4, "0")}_${hash}`;
+}
+
+function getBaselineSweepParameters() {
+  const baseline = {};
+  for (const key of Object.keys(getSweepSearchSpace())) {
+    baseline[key] = config.strategy[key];
+  }
+  return baseline;
+}
+
+function hasSameParameters(a, b) {
+  return getConfigHash(a) === getConfigHash(b);
+}
+
+function selectSweepCombinations(combinations, maxConfigs) {
+  if (combinations.length <= maxConfigs) return combinations;
+  if (maxConfigs <= 1) return [combinations[0]];
+
+  const selected = [];
+  const used = new Set();
+
+  for (let index = 0; index < maxConfigs; index += 1) {
+    const sourceIndex = Math.floor(index * (combinations.length - 1) / (maxConfigs - 1));
+    const combo = combinations[sourceIndex];
+    const hash = getConfigHash(combo);
+    if (!used.has(hash)) {
+      selected.push(combo);
+      used.add(hash);
+    }
+  }
+
+  for (const combo of combinations) {
+    if (selected.length >= maxConfigs) break;
+    const hash = getConfigHash(combo);
+    if (!used.has(hash)) {
+      selected.push(combo);
+      used.add(hash);
+    }
+  }
+
+  return selected;
+}
+
+function buildSweepConfigurations() {
+  const searchSpace = getSweepSearchSpace();
+  const maxConfigs = toNumber(process.env.REPLAY_SWEEP_MAX_CONFIGS, 120, { min: 1, max: 10000 });
+  const baseline = getBaselineSweepParameters();
+  const combinations = cartesianProduct(searchSpace);
+  const sampled = selectSweepCombinations(combinations, maxConfigs);
+  const withBaseline = sampled.some((combo) => hasSameParameters(combo, baseline))
+    ? sampled
+    : [baseline, ...sampled.slice(0, Math.max(0, maxConfigs - 1))];
+
+  return {
+    searchSpace,
+    totalCombinations: combinations.length,
+    evaluatedCombinations: withBaseline.length,
+    maxConfigs,
+    configurations: withBaseline.map((parameters, index) => ({
+      id: getSweepConfigId(parameters, index),
+      parameters
+    }))
+  };
+}
+
+function getTradeCountPenalty(closedTrades, minimumTrades) {
+  if (minimumTrades <= 0 || closedTrades >= minimumTrades) return 0;
+  return (minimumTrades - closedTrades) * 0.75;
+}
+
+function scoreSweepResult(walkForwardGlobal, options = {}) {
+  const train = walkForwardGlobal.train;
+  const test = walkForwardGlobal.test;
+  const minTestTrades = Number(options.minTestTrades) || 0;
+  const trainTestGap = Math.max(0, train.averageR - test.averageR);
+  const drawdownPenalty = test.maxDrawdownR * 0.35;
+  const tradePenalty = getTradeCountPenalty(test.closedTrades, minTestTrades);
+
+  return roundMetric(
+    test.averageR * 3 +
+    test.totalR * 0.45 +
+    test.winrate * 0.01 -
+    drawdownPenalty -
+    trainTestGap * 1.5 -
+    tradePenalty,
+    4
+  );
+}
+
+function getSweepFlags(walkForwardGlobal, options = {}) {
+  const flags = [];
+  const train = walkForwardGlobal.train;
+  const test = walkForwardGlobal.test;
+  const minTestTrades = Number(options.minTestTrades) || 0;
+
+  if (test.closedTrades < minTestTrades) flags.push("low_test_trade_count");
+  if (train.averageR > 0 && test.averageR <= 0) flags.push("train_positive_test_nonpositive");
+  if (train.closedTrades > 0 && test.closedTrades === 0) flags.push("no_oos_closed_trades");
+  if (train.averageR - test.averageR >= 1) flags.push("large_train_test_decay");
+  if (test.maxDrawdownR > Math.max(2, Math.abs(test.totalR))) flags.push("drawdown_exceeds_test_edge");
+
+  return flags;
+}
+
+function rankSweepResults(results, options = {}) {
+  return results
+    .map((result) => {
+      const global = result.summary.walkForward.global;
+      const symbolSegments = Object.values(result.summary.walkForward.bySymbol || {});
+      const testedSymbols = symbolSegments.filter((item) => item.test.closedTrades > 0);
+      const positiveSymbols = testedSymbols.filter((item) => item.test.totalR > 0);
+      const positiveSymbolRatio = testedSymbols.length ? positiveSymbols.length / testedSymbols.length * 100 : 0;
+      return {
+        id: result.id,
+        parameters: result.parameters,
+        score: roundMetric(scoreSweepResult(global, options) + positiveSymbolRatio * 0.01, 4),
+        train: global.train,
+        test: global.test,
+        comparison: global.comparison,
+        positiveSymbolRatio: roundMetric(positiveSymbolRatio, 2),
+        flags: getSweepFlags(global, options)
+      };
+    })
+    .sort((a, b) => {
+      return (b.score - a.score) ||
+        (b.test.averageR - a.test.averageR) ||
+        (a.test.maxDrawdownR - b.test.maxDrawdownR) ||
+        (b.test.closedTrades - a.test.closedTrades);
+    });
+}
+
 export function summarizeReplay(state, options = {}) {
   const performance = getPerformanceState(state);
   const paperTrades = performance.paperTrades;
@@ -323,37 +528,27 @@ export function summarizeReplay(state, options = {}) {
   return summary;
 }
 
-async function main() {
-  const ExchangeClass = ccxt[config.exchange.id];
-  if (!ExchangeClass) throw new Error(`Exchange tidak ditemukan: ${config.exchange.id}`);
-
-  const exchange = new ExchangeClass({
-    enableRateLimit: true,
-    options: { defaultType: config.exchange.marketType }
-  });
-  await exchange.loadMarkets();
-
+export function runReplayOnCandles(candlesBySymbol, options = {}) {
   const state = createDefaultState();
-  const useDatabase = process.env.REPLAY_SOURCE === "database" || process.env.REPLAY_USE_DB === "true";
-  const stateStore = useDatabase ? createStateStore(config.runtime) : null;
   const lifecycleOptions = {
     maxOpenCandles: config.performance.tradeExpiryCandles,
     paperConfig: config.paper
   };
-  const candlesBySymbol = {};
+  const strategyOverrides = options.strategyOverrides || {};
 
   for (const symbol of config.exchange.symbols) {
     const key = `${config.exchange.id}:${symbol}:${config.exchange.timeframe}`;
-    const strategyConfig = getStrategyConfigForSymbol(symbol);
-    const candles = useDatabase
-      ? await loadReplayCandlesFromDatabase(stateStore, exchange, symbol)
-      : await fetchReplayCandles(exchange, symbol);
-    candlesBySymbol[symbol] = candles;
+    const baseStrategyConfig = getStrategyConfigForSymbol(symbol);
+    const tp1ExitPortion = strategyOverrides.tp1ExitPortion ?? baseStrategyConfig.tp1ExitPortion;
+    const tp2ExitPortion = strategyOverrides.tp2ExitPortion ?? baseStrategyConfig.tp2ExitPortion;
+    const strategyConfig = {
+      ...baseStrategyConfig,
+      ...strategyOverrides,
+      tp3ExitPortion: strategyOverrides.tp3ExitPortion ?? Math.max(0, 1 - tp1ExitPortion - tp2ExitPortion)
+    };
+    const candles = candlesBySymbol[symbol] || [];
 
-    if (useDatabase && candles.length === 0) {
-      console.warn(`Tidak ada candle database untuk ${symbol} ${config.exchange.timeframe}.`);
-      continue;
-    }
+    if (candles.length === 0) continue;
 
     for (let index = 250; index < candles.length; index += 1) {
       const window = candles.slice(0, index + 1);
@@ -368,6 +563,11 @@ async function main() {
       });
 
       if (analysis.hasSignal) {
+        analysis.signal.configHash = getConfigHash({
+          exchange: config.exchange,
+          strategy: strategyConfig,
+          paper: config.paper
+        });
         updatePairState(state, key, analysis.signal);
         addPaperTrade(state, key, analysis.signal, config.paper);
       }
@@ -376,12 +576,93 @@ async function main() {
     updatePaperTradeOutcomes(state, key, candles, lifecycleOptions);
   }
 
-  console.log(JSON.stringify(summarizeReplay(state, {
-    walkForward: {
-      candlesBySymbol,
-      trainRatio: getReplayWalkForwardRatio()
+  return state;
+}
+
+export function runReplaySweep(candlesBySymbol, options = {}) {
+  const sweep = buildSweepConfigurations();
+  const trainRatio = clampWalkForwardRatio(options.trainRatio ?? getReplayWalkForwardRatio());
+  const minTestTrades = toNumber(process.env.REPLAY_SWEEP_MIN_TEST_TRADES, 3, { min: 0, max: 100000 });
+  const topLimit = toNumber(process.env.REPLAY_SWEEP_TOP, 10, { min: 1, max: 1000 });
+  const results = [];
+
+  for (const item of sweep.configurations) {
+    const state = runReplayOnCandles(candlesBySymbol, { strategyOverrides: item.parameters });
+    const summary = summarizeReplay(state, {
+      walkForward: {
+        candlesBySymbol,
+        trainRatio
+      }
+    });
+
+    results.push({
+      id: item.id,
+      parameters: item.parameters,
+      summary
+    });
+  }
+
+  const ranking = rankSweepResults(results, { minTestTrades });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    method: "bounded_grid_sweep_with_walk_forward_ranking",
+    researchBasis: [
+      "time_ordered_walk_forward_split",
+      "bounded_grid_search",
+      "oos_weighted_score",
+      "train_test_decay_penalty",
+      "minimum_trade_count_flag"
+    ],
+    searchSpace: sweep.searchSpace,
+    totalCombinations: sweep.totalCombinations,
+    evaluatedCombinations: sweep.evaluatedCombinations,
+    maxConfigs: sweep.maxConfigs,
+    trainRatio,
+    testRatio: roundMetric(1 - trainRatio, 4),
+    minTestTrades,
+    ranking: ranking.slice(0, topLimit),
+    evaluated: ranking
+  };
+}
+
+async function main() {
+  const ExchangeClass = ccxt[config.exchange.id];
+  if (!ExchangeClass) throw new Error(`Exchange tidak ditemukan: ${config.exchange.id}`);
+
+  const exchange = new ExchangeClass({
+    enableRateLimit: true,
+    options: { defaultType: config.exchange.marketType }
+  });
+  await exchange.loadMarkets();
+
+  const useDatabase = process.env.REPLAY_SOURCE === "database" || process.env.REPLAY_USE_DB === "true";
+  const stateStore = useDatabase ? createStateStore(config.runtime) : null;
+  const candlesBySymbol = {};
+
+  for (const symbol of config.exchange.symbols) {
+    const candles = useDatabase
+      ? await loadReplayCandlesFromDatabase(stateStore, exchange, symbol)
+      : await fetchReplayCandles(exchange, symbol);
+    candlesBySymbol[symbol] = candles;
+
+    if (useDatabase && candles.length === 0) {
+      console.warn(`Tidak ada candle database untuk ${symbol} ${config.exchange.timeframe}.`);
+      continue;
     }
-  }), null, 2));
+  }
+
+  const trainRatio = getReplayWalkForwardRatio();
+  const output = toBoolean(process.env.REPLAY_SWEEP_ENABLED, false)
+    ? runReplaySweep(candlesBySymbol, { trainRatio })
+    : summarizeReplay(runReplayOnCandles(candlesBySymbol), {
+      walkForward: {
+        candlesBySymbol,
+        trainRatio
+      }
+    });
+
+  console.log(JSON.stringify(output, null, 2));
   if (stateStore) await stateStore.close();
 }
 

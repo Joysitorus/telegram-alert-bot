@@ -10,6 +10,8 @@
     "once": "cross-env RUN_ONCE=true node src/index.js",
     "replay": "node src/replay.js",
     "replay:db": "cross-env REPLAY_SOURCE=database node src/replay.js",
+    "replay:sweep": "cross-env REPLAY_SWEEP_ENABLED=true node src/replay.js",
+    "replay:sweep:db": "cross-env REPLAY_SOURCE=database REPLAY_SWEEP_ENABLED=true node src/replay.js",
     "test": "node --test",
     "check": "node --check src/index.js && node --check src/config.js && node --check src/commands.js && node --check src/exchange.js && node --check src/health.js && node --check src/indicators.js && node --check src/reliability.js && node --check src/storage.js && node --check src/strategy.js && node --check src/telegram.js && node --check src/state.js && node --check src/utils.js && node --check src/replay.js && node --check test/state.test.js && node --check test/config.test.js && node --check test/exchange.test.js && node --check test/research.test.js && node --check test/replay.test.js"
   },
