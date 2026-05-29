@@ -71,3 +71,42 @@ test("summarizeReplay handles empty replay state", () => {
   assert.deepEqual(summary.global.rejected, { total: 0, reasons: {} });
   assert.deepEqual(summary.bySymbol, {});
 });
+
+test("summarizeReplay reports walk-forward train and test performance", () => {
+  const state = createDefaultState();
+  const performance = getPerformanceState(state);
+  performance.paperTrades = [
+    paperTrade({ symbol: "BTC/USDT:USDT", openedAt: 3_000, closedAt: 4_000, realizedR: 2, realizedPnlUsdt: 20 }),
+    paperTrade({ symbol: "BTC/USDT:USDT", openedAt: 5_000, closedAt: 6_000, outcome: "SL", tp2Hit: false, realizedR: -1, realizedPnlUsdt: -10 }),
+    paperTrade({ symbol: "BTC/USDT:USDT", openedAt: 8_000, closedAt: 9_000, realizedR: 1.5, realizedPnlUsdt: 15 })
+  ];
+
+  const candles = Array.from({ length: 10 }, (_, index) => ({
+    timestamp: (index + 1) * 1_000,
+    open: 1,
+    high: 1,
+    low: 1,
+    close: 1,
+    volume: 1
+  }));
+  const summary = summarizeReplay(state, {
+    walkForward: {
+      candlesBySymbol: { "BTC/USDT:USDT": candles },
+      trainRatio: 0.7
+    }
+  });
+
+  assert.equal(summary.walkForward.trainRatio, 0.7);
+  assert.equal(summary.walkForward.testRatio, 0.3);
+  assert.equal(summary.walkForward.bySymbol["BTC/USDT:USDT"].trainWindow.candleCount, 7);
+  assert.equal(summary.walkForward.bySymbol["BTC/USDT:USDT"].testWindow.candleCount, 3);
+  assert.equal(summary.walkForward.global.train.closedTrades, 2);
+  assert.equal(summary.walkForward.global.train.totalR, 1);
+  assert.equal(summary.walkForward.global.train.averageR, 0.5);
+  assert.equal(summary.walkForward.global.train.maxDrawdownR, 1);
+  assert.equal(summary.walkForward.global.test.closedTrades, 1);
+  assert.equal(summary.walkForward.global.test.totalR, 1.5);
+  assert.equal(summary.walkForward.global.comparison.averageRDelta, 1);
+  assert.equal(summary.walkForward.global.comparison.closedTradeDelta, -1);
+  assert.equal(summary.walkForward.global.unassignedTrades, 0);
+});

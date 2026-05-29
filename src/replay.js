@@ -86,6 +86,27 @@ function getMaxDrawdownFromEquityCurve(equityCurve = []) {
   };
 }
 
+function getMaxDrawdownFromTradeR(trades) {
+  const closed = trades
+    .filter((trade) => trade.outcome)
+    .sort((a, b) => {
+      const aTime = Number(a.closedAt ?? a.openedAt ?? 0);
+      const bTime = Number(b.closedAt ?? b.openedAt ?? 0);
+      return aTime - bTime;
+    });
+  let equityR = 0;
+  let peakR = 0;
+  let maxDrawdownR = 0;
+
+  for (const trade of closed) {
+    equityR += Number(trade.realizedR) || 0;
+    peakR = Math.max(peakR, equityR);
+    maxDrawdownR = Math.max(maxDrawdownR, peakR - equityR);
+  }
+
+  return { maxDrawdownR: roundMetric(maxDrawdownR, 4) };
+}
+
 function summarizeTrades(trades) {
   const closed = trades.filter((trade) => trade.outcome);
   const wins = closed.filter(getTradeWin).length;
@@ -114,6 +135,13 @@ function summarizeTrades(trades) {
   };
 }
 
+function summarizeReplayTradeSet(trades) {
+  return {
+    ...summarizeTrades(trades),
+    ...getMaxDrawdownFromTradeR(trades)
+  };
+}
+
 function getRejectedReasonSummary(state) {
   const account = getPerformanceState(state).paperAccount || {};
   const summary = {};
@@ -128,7 +156,141 @@ function getRejectedReasonSummary(state) {
   };
 }
 
-export function summarizeReplay(state) {
+function getTimestampIso(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value)) return null;
+  return new Date(value).toISOString();
+}
+
+function clampWalkForwardRatio(value) {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return 0.7;
+  return ratio;
+}
+
+function getWalkForwardWindows(candles, trainRatio) {
+  const sortedCandles = [...(candles || [])]
+    .filter((candle) => Number.isFinite(Number(candle.timestamp)))
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+
+  if (sortedCandles.length < 2) {
+    return {
+      train: null,
+      test: null
+    };
+  }
+
+  const splitIndex = Math.min(
+    sortedCandles.length - 1,
+    Math.max(1, Math.floor(sortedCandles.length * trainRatio))
+  );
+  const trainStart = sortedCandles[0];
+  const trainEnd = sortedCandles[splitIndex - 1];
+  const testStart = sortedCandles[splitIndex];
+  const testEnd = sortedCandles.at(-1);
+
+  return {
+    train: {
+      startTime: trainStart.timestamp,
+      endTime: trainEnd.timestamp,
+      startIso: getTimestampIso(trainStart.timestamp),
+      endIso: getTimestampIso(trainEnd.timestamp),
+      candleCount: splitIndex
+    },
+    test: {
+      startTime: testStart.timestamp,
+      endTime: testEnd.timestamp,
+      startIso: getTimestampIso(testStart.timestamp),
+      endIso: getTimestampIso(testEnd.timestamp),
+      candleCount: sortedCandles.length - splitIndex
+    }
+  };
+}
+
+function splitTradesByWindow(trades, windows) {
+  const train = [];
+  const test = [];
+  const unassigned = [];
+
+  for (const trade of trades) {
+    const openedAt = Number(trade.openedAt ?? trade.signalCandleTime);
+    if (!Number.isFinite(openedAt) || !windows.train || !windows.test) {
+      unassigned.push(trade);
+    } else if (openedAt <= windows.train.endTime) {
+      train.push(trade);
+    } else if (openedAt >= windows.test.startTime) {
+      test.push(trade);
+    } else {
+      unassigned.push(trade);
+    }
+  }
+
+  return { train, test, unassigned };
+}
+
+function compareReplaySegments(train, test) {
+  return {
+    winrateDelta: roundMetric(test.winrate - train.winrate, 2),
+    averageRDelta: roundMetric(test.averageR - train.averageR, 4),
+    totalRDelta: roundMetric(test.totalR - train.totalR, 4),
+    maxDrawdownRDelta: roundMetric(test.maxDrawdownR - train.maxDrawdownR, 4),
+    closedTradeDelta: test.closedTrades - train.closedTrades
+  };
+}
+
+function summarizeWalkForward(state, options = {}) {
+  const performance = getPerformanceState(state);
+  const paperTrades = performance.paperTrades;
+  const candlesBySymbol = options.candlesBySymbol || {};
+  const trainRatio = clampWalkForwardRatio(options.trainRatio);
+  const globalTrainTrades = [];
+  const globalTestTrades = [];
+  const globalUnassignedTrades = [];
+  const bySymbol = {};
+
+  for (const [symbol, candles] of Object.entries(candlesBySymbol).sort(([a], [b]) => a.localeCompare(b))) {
+    const symbolTrades = paperTrades.filter((trade) => (trade.symbol || "unknown") === symbol);
+    const windows = getWalkForwardWindows(candles, trainRatio);
+    const split = splitTradesByWindow(symbolTrades, windows);
+    const train = summarizeReplayTradeSet(split.train);
+    const test = summarizeReplayTradeSet(split.test);
+
+    globalTrainTrades.push(...split.train);
+    globalTestTrades.push(...split.test);
+    globalUnassignedTrades.push(...split.unassigned);
+
+    bySymbol[symbol] = {
+      trainWindow: windows.train,
+      testWindow: windows.test,
+      train,
+      test,
+      comparison: compareReplaySegments(train, test),
+      unassignedTrades: split.unassigned.length
+    };
+  }
+
+  const train = summarizeReplayTradeSet(globalTrainTrades);
+  const test = summarizeReplayTradeSet(globalTestTrades);
+
+  return {
+    method: "single_pass_per_symbol_time_split",
+    trainRatio,
+    testRatio: roundMetric(1 - trainRatio, 4),
+    global: {
+      train,
+      test,
+      comparison: compareReplaySegments(train, test),
+      unassignedTrades: globalUnassignedTrades.length
+    },
+    bySymbol
+  };
+}
+
+function getReplayWalkForwardRatio() {
+  return clampWalkForwardRatio(process.env.REPLAY_WALK_FORWARD_RATIO ?? process.env.REPLAY_TRAIN_RATIO ?? 0.7);
+}
+
+export function summarizeReplay(state, options = {}) {
   const performance = getPerformanceState(state);
   const paperTrades = performance.paperTrades;
   const paperAccount = performance.paperAccount || {};
@@ -140,7 +302,7 @@ export function summarizeReplay(state) {
     bySymbol[symbol].push(trade);
   }
 
-  return {
+  const summary = {
     generatedAt: new Date().toISOString(),
     global: {
       ...summarizeTrades(paperTrades),
@@ -153,6 +315,12 @@ export function summarizeReplay(state) {
         .map(([symbol, trades]) => [symbol, summarizeTrades(trades)])
     )
   };
+
+  if (options.walkForward) {
+    summary.walkForward = summarizeWalkForward(state, options.walkForward);
+  }
+
+  return summary;
 }
 
 async function main() {
@@ -172,6 +340,7 @@ async function main() {
     maxOpenCandles: config.performance.tradeExpiryCandles,
     paperConfig: config.paper
   };
+  const candlesBySymbol = {};
 
   for (const symbol of config.exchange.symbols) {
     const key = `${config.exchange.id}:${symbol}:${config.exchange.timeframe}`;
@@ -179,6 +348,7 @@ async function main() {
     const candles = useDatabase
       ? await loadReplayCandlesFromDatabase(stateStore, exchange, symbol)
       : await fetchReplayCandles(exchange, symbol);
+    candlesBySymbol[symbol] = candles;
 
     if (useDatabase && candles.length === 0) {
       console.warn(`Tidak ada candle database untuk ${symbol} ${config.exchange.timeframe}.`);
@@ -206,7 +376,12 @@ async function main() {
     updatePaperTradeOutcomes(state, key, candles, lifecycleOptions);
   }
 
-  console.log(JSON.stringify(summarizeReplay(state), null, 2));
+  console.log(JSON.stringify(summarizeReplay(state, {
+    walkForward: {
+      candlesBySymbol,
+      trainRatio: getReplayWalkForwardRatio()
+    }
+  }), null, 2));
   if (stateStore) await stateStore.close();
 }
 

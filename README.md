@@ -635,6 +635,7 @@ Filter waktu opsional:
 REPLAY_SOURCE=database
 REPLAY_SINCE=2026-05-01T00:00:00Z
 REPLAY_UNTIL=2026-05-26T00:00:00Z
+REPLAY_WALK_FORWARD_RATIO=0.7
 ```
 
 `npm run replay:db` membutuhkan `DATABASE_URL` dan data candle yang sudah terkumpul di `market_candles`. Jika tabel belum berisi candle untuk symbol/timeframe yang dipilih, replay DB akan melewati symbol tersebut.
@@ -643,6 +644,7 @@ Output replay berupa JSON dengan:
 
 - `global` - total trade, closed/open trade, wins, losses, liquidations, winrate, average R, total R, realized PnL USDT, max drawdown, outcome breakdown, dan rejected paper trade summary.
 - `bySymbol` - breakdown metrik yang sama per symbol.
+- `walkForward` - split train/test per symbol berbasis urutan waktu candle. Default `REPLAY_WALK_FORWARD_RATIO=0.7`, yaitu 70% candle awal untuk training/kalibrasi dan 30% candle akhir untuk validasi.
 
 Contoh field penting:
 
@@ -659,6 +661,15 @@ Contoh field penting:
   },
   "bySymbol": {
     "BTC/USDT:USDT": { "closedTrades": 5, "winrate": 60, "totalR": 2.1 }
+  },
+  "walkForward": {
+    "trainRatio": 0.7,
+    "testRatio": 0.3,
+    "global": {
+      "train": { "closedTrades": 7, "averageR": 0.42, "totalR": 2.94, "maxDrawdownR": 1.2 },
+      "test": { "closedTrades": 3, "averageR": -0.15, "totalR": -0.45, "maxDrawdownR": 1 },
+      "comparison": { "averageRDelta": -0.57, "totalRDelta": -3.39, "closedTradeDelta": -4 }
+    }
   }
 }
 ```
