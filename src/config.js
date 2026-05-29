@@ -1,6 +1,12 @@
 import "dotenv/config";
 import { parseCsv, parseJson, toBoolean, toNumber } from "./utils.js";
 
+const timeframePattern = /^\d+[mhdwM]$/;
+const validMarketTypes = new Set(["spot", "margin", "swap", "future"]);
+const validRegimes = new Set(["trending", "ranging", "high_volatility", "low_volatility"]);
+const validEntryModes = new Set(["breakout_close", "breakout_retest", "pullback_trend"]);
+const validRiskModes = new Set(["fixed_notional", "fixed_margin", "risk_percent_equity", "volatility_target"]);
+
 const builtInStrategyProfiles = {
   scalping: { minConfirm: 5, minRR: 2.0, maxSafeSlPercent: 3.0, cooldownSeconds: 900 },
   swing: { minConfirm: 5, minRR: 3.0, maxSafeSlPercent: 6.0, cooldownSeconds: 7200 },
@@ -223,62 +229,225 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-export function validateConfig() {
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFiniteNumber(value) {
+  return Number.isFinite(Number(value));
+}
+
+function isPositiveNumber(value) {
+  return isFiniteNumber(value) && Number(value) > 0;
+}
+
+function getTimeframeMs(timeframe) {
+  const match = String(timeframe || "").trim().match(/^(\d+)(m|h|d|w|M)$/);
+  if (!match) return null;
+
+  const multipliers = {
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+    w: 7 * 24 * 60 * 60 * 1000,
+    M: 30 * 24 * 60 * 60 * 1000
+  };
+
+  return Number(match[1]) * multipliers[match[2]];
+}
+
+function isValidTimeZone(value) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date(0));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateStrategyOverride(name, override, errors) {
+  if (!isPlainObject(override)) {
+    errors.push(`${name} harus berupa object.`);
+    return;
+  }
+
+  if (Object.hasOwn(override, "minConfirm") && (!isFiniteNumber(override.minConfirm) || override.minConfirm < 1 || override.minConfirm > 7)) {
+    errors.push(`${name}.minConfirm harus angka 1 sampai 7.`);
+  }
+
+  if (Object.hasOwn(override, "minRR") && !isPositiveNumber(override.minRR)) {
+    errors.push(`${name}.minRR harus lebih besar dari 0.`);
+  }
+
+  if (Object.hasOwn(override, "maxSafeSlPercent") && !isPositiveNumber(override.maxSafeSlPercent)) {
+    errors.push(`${name}.maxSafeSlPercent harus lebih besar dari 0.`);
+  }
+
+  if (Object.hasOwn(override, "cooldownSeconds") && (!isFiniteNumber(override.cooldownSeconds) || override.cooldownSeconds < 0)) {
+    errors.push(`${name}.cooldownSeconds tidak boleh negatif.`);
+  }
+
+  if (Object.hasOwn(override, "entryMode") && !validEntryModes.has(override.entryMode)) {
+    errors.push(`${name}.entryMode tidak valid. Gunakan breakout_close, breakout_retest, atau pullback_trend.`);
+  }
+}
+
+export function buildConfigValidationErrors(value = config) {
   const errors = [];
+  const cfg = value || {};
+  const telegram = cfg.telegram || {};
+  const exchange = cfg.exchange || {};
+  const runtime = cfg.runtime || {};
+  const paper = cfg.paper || {};
+  const performance = cfg.performance || {};
+  const lesson = cfg.lesson || {};
+  const backup = cfg.backup || {};
+  const marketData = cfg.marketData || {};
+  const orderBookLiquidity = cfg.orderBookLiquidity || {};
+  const strategy = cfg.strategy || {};
 
-  if (!config.telegram.botToken) errors.push("TELEGRAM_BOT_TOKEN belum diisi.");
-  if (!config.telegram.chatId) errors.push("TELEGRAM_CHAT_ID belum diisi.");
-  if (!config.exchange.id) errors.push("EXCHANGE belum diisi.");
-  if (!config.exchange.symbols.length) errors.push("SYMBOLS belum diisi.");
+  if (!telegram.botToken) errors.push("TELEGRAM_BOT_TOKEN belum diisi.");
+  if (!telegram.chatId) errors.push("TELEGRAM_CHAT_ID belum diisi.");
+  if (!exchange.id) errors.push("EXCHANGE belum diisi.");
+  if (!Array.isArray(exchange.symbols) || !exchange.symbols.length) errors.push("SYMBOLS belum diisi.");
 
-  if (!/^\d+[mhdwM]$/.test(config.exchange.timeframe)) {
+  if (exchange.marketType && !validMarketTypes.has(exchange.marketType)) {
+    errors.push("MARKET_TYPE tidak valid. Gunakan spot, margin, swap, atau future.");
+  }
+
+  if (!timeframePattern.test(exchange.timeframe)) {
     errors.push("TIMEFRAME tidak valid. Contoh valid: 1m, 15m, 1h, 4h, 1d.");
   }
 
-  if (config.strategy.emaFast >= config.strategy.emaMid) {
+  if (Array.isArray(exchange.symbols)) {
+    for (const symbol of exchange.symbols) {
+      if (!String(symbol || "").includes("/")) {
+        errors.push(`SYMBOLS berisi symbol tidak valid: ${symbol}. Contoh valid: BTC/USDT atau BTC/USDT:USDT.`);
+      }
+    }
+  }
+
+  if (runtime.databaseUrl && !/^postgres(?:ql)?:\/\//.test(runtime.databaseUrl)) {
+    errors.push("DATABASE_URL harus berupa URL PostgreSQL.");
+  }
+
+  if (runtime.healthcheckPort !== undefined && (!Number.isInteger(Number(runtime.healthcheckPort)) || Number(runtime.healthcheckPort) < 1 || Number(runtime.healthcheckPort) > 65535)) {
+    errors.push("HEALTHCHECK_PORT harus angka 1 sampai 65535.");
+  }
+
+  if (!isValidTimeZone(performance.reportTimezone)) {
+    errors.push("PERFORMANCE_REPORT_TIMEZONE tidak valid.");
+  }
+
+  if (!isValidTimeZone(backup.timezone)) {
+    errors.push("DAILY_BACKUP_TIMEZONE tidak valid.");
+  }
+
+  if (marketData.analysisLimit < exchange.candleLimit) {
+    errors.push("MARKET_CANDLES_ANALYSIS_LIMIT sebaiknya tidak lebih kecil dari CANDLE_LIMIT.");
+  }
+
+  if (orderBookLiquidity.enabled && orderBookLiquidity.depthLimit < 5) {
+    errors.push("ORDER_BOOK_DEPTH_LIMIT minimal 5 saat order book liquidity aktif.");
+  }
+
+  if (strategy.emaFast >= strategy.emaMid) {
     errors.push("EMA_FAST sebaiknya lebih kecil dari EMA_MID.");
   }
 
-  if (config.strategy.emaMid >= config.strategy.emaLong) {
+  if (strategy.emaMid >= strategy.emaLong) {
     errors.push("EMA_MID sebaiknya lebih kecil dari EMA_LONG.");
   }
 
-  if (config.strategy.tp1Portion >= config.strategy.tp2Portion) {
+  if (strategy.tp1Portion >= strategy.tp2Portion) {
     errors.push("TP1_PORTION harus lebih kecil dari TP2_PORTION.");
   }
 
-  if (config.strategy.tp1ExitPortion + config.strategy.tp2ExitPortion > 1) {
+  if (strategy.tp1ExitPortion + strategy.tp2ExitPortion > 1) {
     errors.push("TP1_EXIT_PORTION + TP2_EXIT_PORTION tidak boleh lebih dari 1.");
   }
 
-  if (config.strategy.higherTimeframe && !/^\d+[mhdwM]$/.test(config.strategy.higherTimeframe)) {
+  if (strategy.higherTimeframe && !timeframePattern.test(strategy.higherTimeframe)) {
     errors.push("HIGHER_TIMEFRAME tidak valid. Contoh valid: 1h, 4h, 1d.");
   }
 
-  const validRegimes = new Set(["trending", "ranging", "high_volatility", "low_volatility"]);
-  for (const regime of config.strategy.marketRegimeFilter) {
+  const baseTimeframeMs = getTimeframeMs(exchange.timeframe);
+  const higherTimeframeMs = getTimeframeMs(strategy.higherTimeframe);
+  if (strategy.requireHigherTimeframeTrend && !strategy.higherTimeframe) {
+    errors.push("HIGHER_TIMEFRAME wajib diisi saat REQUIRE_HIGHER_TIMEFRAME_TREND=true.");
+  }
+  if (baseTimeframeMs && higherTimeframeMs && higherTimeframeMs <= baseTimeframeMs) {
+    errors.push("HIGHER_TIMEFRAME harus lebih besar dari TIMEFRAME.");
+  }
+
+  for (const regime of strategy.marketRegimeFilter || []) {
     if (!validRegimes.has(regime)) {
       errors.push(`MARKET_REGIME_FILTER tidak valid: ${regime}. Gunakan trending,ranging,high_volatility,low_volatility.`);
     }
   }
 
-  if (config.strategy.maxOpenInterest > 0 && config.strategy.minOpenInterest > config.strategy.maxOpenInterest) {
+  if (strategy.maxOpenInterest > 0 && strategy.minOpenInterest > strategy.maxOpenInterest) {
     errors.push("MIN_OPEN_INTEREST tidak boleh lebih besar dari MAX_OPEN_INTEREST.");
   }
 
-  if (config.strategy.maxLongShortRatio > 0 && config.strategy.minLongShortRatio > config.strategy.maxLongShortRatio) {
+  if (strategy.maxLongShortRatio > 0 && strategy.minLongShortRatio > strategy.maxLongShortRatio) {
     errors.push("MIN_LONG_SHORT_RATIO tidak boleh lebih besar dari MAX_LONG_SHORT_RATIO.");
   }
 
-  const validEntryModes = new Set(["breakout_close", "breakout_retest", "pullback_trend"]);
-  if (!validEntryModes.has(config.strategy.entryMode)) {
+  if (!validEntryModes.has(strategy.entryMode)) {
     errors.push("ENTRY_MODE tidak valid. Gunakan breakout_close, breakout_retest, atau pullback_trend.");
   }
 
-  const validRiskModes = new Set(["fixed_notional", "fixed_margin", "risk_percent_equity", "volatility_target"]);
-  if (!validRiskModes.has(config.paper.riskMode)) {
+  if (!validRiskModes.has(paper.riskMode)) {
     errors.push("PAPER_TRADING_RISK_MODE tidak valid. Gunakan fixed_notional, fixed_margin, risk_percent_equity, atau volatility_target.");
   }
+
+  if (paper.enabled) {
+    if (!isPositiveNumber(paper.initialBalance)) errors.push("PAPER_TRADING_INITIAL_BALANCE harus lebih besar dari 0 saat paper trading aktif.");
+    if (!isPositiveNumber(paper.leverage)) errors.push("PAPER_TRADING_LEVERAGE harus lebih besar dari 0 saat paper trading aktif.");
+    if (paper.riskMode === "fixed_notional" && !isPositiveNumber(paper.positionNotional)) {
+      errors.push("PAPER_TRADING_POSITION_NOTIONAL harus lebih besar dari 0 untuk risk mode fixed_notional.");
+    }
+    if (paper.riskMode === "fixed_margin" && !isPositiveNumber(paper.fixedMargin)) {
+      errors.push("PAPER_TRADING_FIXED_MARGIN harus lebih besar dari 0 untuk risk mode fixed_margin.");
+    }
+    if ((paper.riskMode === "risk_percent_equity" || paper.riskMode === "volatility_target") && !isPositiveNumber(paper.riskPercentEquity)) {
+      errors.push("PAPER_TRADING_RISK_PERCENT_EQUITY harus lebih besar dari 0 untuk risk mode risk_percent_equity/volatility_target.");
+    }
+  }
+
+  if (lesson.enabled && lesson.applyFilter && lesson.minSamples < 1) {
+    errors.push("LESSON_MIN_SAMPLES minimal 1 saat lesson filter aktif.");
+  }
+
+  if (!isPlainObject(strategy.customProfiles)) {
+    errors.push("STRATEGY_PROFILES_JSON harus berupa object JSON.");
+  } else {
+    for (const [name, profile] of Object.entries(strategy.customProfiles)) {
+      validateStrategyOverride(`STRATEGY_PROFILES_JSON.${name}`, profile, errors);
+    }
+  }
+
+  if (strategy.profile && isPlainObject(strategy.customProfiles) && !builtInStrategyProfiles[strategy.profile] && !strategy.customProfiles[strategy.profile]) {
+    errors.push(`STRATEGY_PROFILE tidak dikenal: ${strategy.profile}. Gunakan scalping, swing, meme, major, atau profile custom.`);
+  }
+
+  if (!isPlainObject(strategy.symbolOverrides)) {
+    errors.push("SYMBOL_STRATEGY_OVERRIDES_JSON harus berupa object JSON.");
+  } else {
+    for (const [symbol, override] of Object.entries(strategy.symbolOverrides)) {
+      if (!String(symbol || "").includes("/")) {
+        errors.push(`SYMBOL_STRATEGY_OVERRIDES_JSON berisi symbol tidak valid: ${symbol}.`);
+      }
+      validateStrategyOverride(`SYMBOL_STRATEGY_OVERRIDES_JSON.${symbol}`, override, errors);
+    }
+  }
+
+  return errors;
+}
+
+export function validateConfig(value = config) {
+  const errors = buildConfigValidationErrors(value);
 
   if (errors.length > 0) {
     throw new Error(errors.join("\n"));

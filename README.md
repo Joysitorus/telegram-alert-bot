@@ -10,6 +10,7 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 
 - Scanner multi-symbol dari exchange yang didukung CCXT.
 - Market spot dan swap/perpetual melalui konfigurasi `EXCHANGE` dan `MARKET_TYPE`.
+- Validasi market futures berbasis metadata CCXT: contract type, linear/inverse, settle coin, contract size, dan symbol yang benar.
 - Strategi EMA, RSI, MACD, ADX, volume, breakout, safe-zone SL, order block, smart liquidity TP, market regime, higher timeframe, funding, open interest, dan long/short ratio.
 - Signal-quality filter untuk mengurangi sinyal yang rawan langsung kena SL.
 - Trade lifecycle: `OPEN`, `TP1_HIT`, `TP2_HIT`, `TP3_HIT`, `SL_HIT`, `EXPIRED`, dan `LIQUIDATED`.
@@ -18,6 +19,7 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 - Telegram command center dengan role admin/operator/viewer dan inline keyboard.
 - State storage lokal atau PostgreSQL.
 - Market candle warehouse di PostgreSQL untuk menyimpan candle tertutup, memperkuat lesson, replay, dan dashboard.
+- Research data warehouse di PostgreSQL untuk signal decision, market snapshot, candle, order book liquidity, lesson, dan lesson stats.
 - Order book liquidity zones gratis dari public order book exchange untuk membaca bid/ask wall terdekat.
 - Lesson learning untuk mencatat outcome sinyal dan menolak setup yang performanya buruk setelah sampel cukup.
 - Backup manual dan backup harian otomatis ke Telegram dalam format `.json.gz`.
@@ -49,6 +51,8 @@ Exchange public API
 Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL tersentuh dalam candle yang sama, lifecycle dihitung konservatif karena data OHLC tidak memberi urutan intrabar.
 
 Jika `DATABASE_URL` aktif, bot juga bisa menyimpan candle yang sudah diambil ke PostgreSQL agar data sinyal, lesson, replay, dan dashboard makin kuat. Candle tetap diambil dari exchange sebagai sumber awal, lalu di-upsert ke tabel `market_candles`.
+
+Selain blob state utama di `bot_state`, PostgreSQL juga menyimpan data riset ke tabel query-friendly: `bot_signal_decisions`, `market_snapshots`, `market_candles`, `order_book_liquidity_zones`, `bot_lessons`, dan `bot_lesson_stats`. Ini membuat analisis sinyal/rejected setup, snapshot market, dan lesson bisa di-query langsung tanpa membaca JSON state penuh.
 
 Bot juga bisa membaca order book publik gratis dari exchange untuk menghitung liquidity wall. Ini bukan liquidation heatmap asli, tetapi memberi konteks bid/ask wall terdekat yang bisa dipakai sebagai informasi sinyal atau filter opsional.
 
@@ -114,6 +118,7 @@ telegram-crypto-alert-bot/
 |-- src/
 |   |-- index.js        # entry point scanner
 |   |-- config.js       # env config, validation, config hash
+|   |-- exchange.js     # metadata market CCXT, futures validation, notional contract-aware
 |   |-- strategy.js     # sinyal, filters, TP/SL, market context
 |   |-- indicators.js   # indikator teknikal
 |   |-- state.js        # state, lifecycle, paper trading, risk guard
@@ -227,6 +232,8 @@ CHECK_INTERVAL_SECONDS=300
 ```
 
 Format symbol futures bisa berbeda antar exchange. Jika symbol tidak ditemukan, cek format market CCXT untuk exchange tersebut.
+
+Saat startup, bot sekarang memvalidasi symbol terhadap metadata `exchange.markets` CCXT. Untuk `MARKET_TYPE=swap` atau `MARKET_TYPE=future`, symbol harus berupa contract market. Bot juga membaca `linear`/`inverse`, `settle`, dan `contractSize`; data ini dipakai untuk menghitung notional order book wall agar nilai liquidity lebih akurat untuk contract futures. Jika metadata contract penting tidak cocok, startup akan gagal; jika metadata tambahan tidak lengkap, bot memberi warning di log.
 
 ## Strategi
 
@@ -492,6 +499,8 @@ Table PostgreSQL yang dibuat otomatis:
 
 ```text
 bot_state          # state utama bot dalam JSONB
+bot_signal_decisions # riwayat keputusan sinyal accepted/rejected
+market_snapshots   # snapshot OHLCV/context per scan
 bot_lessons        # lesson per closed signal/trade
 bot_lesson_stats   # agregasi statistik lesson
 market_candles     # candle tertutup untuk analisis/replay/dashboard
@@ -570,6 +579,7 @@ DATA_RETENTION_DAYS=30
 ```
 
 File storage memakai lock file lokal. PostgreSQL memakai advisory lock.
+`DATA_RETENTION_DAYS` juga membersihkan data warehouse berukuran besar (`bot_signal_decisions`, `market_snapshots`, `market_candles`, dan `order_book_liquidity_zones`) secara berkala. Lesson dan aggregated lesson stats tidak ikut dibersihkan agar pembelajaran strategi tetap panjang.
 
 ## Health, Dashboard, dan Metrics
 
@@ -641,7 +651,7 @@ Test:
 npm test
 ```
 
-Test saat ini mencakup paper liquidation, partial target/margin release, dan daily loss limit. Roadmap berikutnya memprioritaskan coverage lifecycle dan strategy filter yang lebih luas.
+Test saat ini mencakup config validation, exchange futures metadata/notional, research record IDs/retention limit, paper liquidation, partial target/margin release, daily loss limit, dan lesson filter. Roadmap berikutnya memprioritaskan coverage lifecycle dan strategy filter yang lebih luas.
 
 ## Deploy ke Railway
 
@@ -791,8 +801,8 @@ Roadmap terbaru ada di `ROADMAP.md`.
 Prioritas berikutnya:
 
 1. Validation dan test coverage.
-2. Exchange-specific futures accuracy.
-3. Research data warehouse.
+2. Exchange-specific futures accuracy. Dasar metadata CCXT, validasi contract market, dan notional order book contract-aware sudah dibuat; fase berikutnya bisa memperluas ke adapter exchange khusus dan execution readiness.
+3. Research data warehouse. Tabel query-friendly untuk signal decisions dan market snapshots sudah ditambahkan di PostgreSQL, melengkapi candle, order book, lesson, dan lesson stats.
 4. Strategy lab dan walk-forward.
 5. Advanced signal quality.
 6. Portfolio risk dan capital allocation.

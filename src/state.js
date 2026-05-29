@@ -3,6 +3,31 @@ import path from "path";
 
 export const CURRENT_STATE_SCHEMA_VERSION = 3;
 
+function safeIdPart(value, fallback = "na") {
+  return String(value ?? fallback).replace(/[^a-zA-Z0-9_.:-]/g, "_");
+}
+
+function buildResearchRecordId(prefix, input, index = 0) {
+  const at = Number(input.at) || Date.now();
+  const exchange = safeIdPart(input.exchange || "exchange");
+  const symbol = safeIdPart(input.symbol || "symbol");
+  const timeframe = safeIdPart(input.timeframe || "timeframe");
+  const candleTime = safeIdPart(input.candleTime ?? input.debug?.lastCandleTime ?? input.timestamp ?? "no_candle");
+  return `${prefix}:${exchange}:${symbol}:${timeframe}:${at}:${candleTime}:${index}`;
+}
+
+function normalizeResearchRecords(records, prefix) {
+  return records.map((record, index) => {
+    const normalized = record && typeof record === "object" ? record : {};
+    const at = Number(normalized.at) || Date.now();
+    if (!normalized.id) {
+      normalized.id = buildResearchRecordId(prefix, { ...normalized, at }, index);
+    }
+    if (!Object.hasOwn(normalized, "at")) normalized.at = at;
+    return normalized;
+  });
+}
+
 function createDefaultPerformanceState() {
   return {
     openTrades: [],
@@ -107,10 +132,13 @@ export function normalizeState(state) {
   if (!Array.isArray(normalized.research.orderBookSnapshots)) normalized.research.orderBookSnapshots = [];
   if (!Array.isArray(normalized.research.lessons)) normalized.research.lessons = [];
   if (!normalized.research.lessonStats || typeof normalized.research.lessonStats !== "object") normalized.research.lessonStats = {};
+  normalized.research.signalDecisions = normalizeResearchRecords(normalized.research.signalDecisions, "signal_decision");
+  normalized.research.marketSnapshots = normalizeResearchRecords(normalized.research.marketSnapshots, "market_snapshot");
+  normalized.research.orderBookSnapshots = normalizeResearchRecords(normalized.research.orderBookSnapshots, "order_book_snapshot");
   if (!normalized.performance) normalized.performance = createDefaultPerformanceState();
-  if (!normalized.performance.openTrades) normalized.performance.openTrades = [];
-  if (!normalized.performance.closedTrades) normalized.performance.closedTrades = [];
-  if (!normalized.performance.paperTrades) normalized.performance.paperTrades = [];
+  if (!Array.isArray(normalized.performance.openTrades)) normalized.performance.openTrades = [];
+  if (!Array.isArray(normalized.performance.closedTrades)) normalized.performance.closedTrades = [];
+  if (!Array.isArray(normalized.performance.paperTrades)) normalized.performance.paperTrades = [];
   normalized.performance.paperAccount = normalizePaperAccount(normalized.performance.paperAccount);
   if (!Object.hasOwn(normalized.performance, "lastWeeklyReportKey")) normalized.performance.lastWeeklyReportKey = null;
   if (!Object.hasOwn(normalized.performance, "lastMonthlyReportKey")) normalized.performance.lastMonthlyReportKey = null;
@@ -769,9 +797,11 @@ function optionsTrailEnabled(paperAccount) {
 
 export function recordSignalDecision(state, decision, limit = 1000) {
   const normalized = normalizeState(state);
+  const at = Number(decision?.at) || Date.now();
   normalized.research.signalDecisions.push({
-    at: Date.now(),
-    ...decision
+    at,
+    ...decision,
+    id: decision?.id || buildResearchRecordId("signal_decision", { ...decision, at }, normalized.research.signalDecisions.length)
   });
   if (normalized.research.signalDecisions.length > limit) {
     normalized.research.signalDecisions = normalized.research.signalDecisions.slice(-limit);
@@ -780,9 +810,11 @@ export function recordSignalDecision(state, decision, limit = 1000) {
 
 export function recordMarketSnapshot(state, snapshot, limit = 2000) {
   const normalized = normalizeState(state);
+  const at = Number(snapshot?.at) || Date.now();
   normalized.research.marketSnapshots.push({
-    at: Date.now(),
-    ...snapshot
+    at,
+    ...snapshot,
+    id: snapshot?.id || buildResearchRecordId("market_snapshot", { ...snapshot, at }, normalized.research.marketSnapshots.length)
   });
   if (normalized.research.marketSnapshots.length > limit) {
     normalized.research.marketSnapshots = normalized.research.marketSnapshots.slice(-limit);
@@ -791,9 +823,11 @@ export function recordMarketSnapshot(state, snapshot, limit = 2000) {
 
 export function recordOrderBookSnapshot(state, snapshot, limit = 1000) {
   const normalized = normalizeState(state);
+  const at = Number(snapshot?.at) || Date.now();
   normalized.research.orderBookSnapshots.push({
-    at: Date.now(),
-    ...snapshot
+    at,
+    ...snapshot,
+    id: snapshot?.id || buildResearchRecordId("order_book_snapshot", { ...snapshot, at }, normalized.research.orderBookSnapshots.length)
   });
   if (normalized.research.orderBookSnapshots.length > limit) {
     normalized.research.orderBookSnapshots = normalized.research.orderBookSnapshots.slice(-limit);

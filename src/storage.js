@@ -28,6 +28,20 @@ function chunkArray(items, size) {
   return chunks;
 }
 
+function safeIdPart(value, fallback = "na") {
+  return String(value ?? fallback).replace(/[^a-zA-Z0-9_.:-]/g, "_");
+}
+
+function getResearchRecordId(prefix, record, index = 0) {
+  if (record?.id) return record.id;
+  const at = finiteNumberOrNull(record?.at) || Date.now();
+  const exchange = safeIdPart(record?.exchange || "exchange");
+  const symbol = safeIdPart(record?.symbol || "symbol");
+  const timeframe = safeIdPart(record?.timeframe || "timeframe");
+  const candleTime = safeIdPart(record?.candleTime ?? record?.debug?.lastCandleTime ?? record?.timestamp ?? "no_candle");
+  return `${prefix}:${exchange}:${symbol}:${timeframe}:${at}:${candleTime}:${index}`;
+}
+
 class FileStateStore {
   constructor(stateFile) {
     this.type = "file";
@@ -92,14 +106,18 @@ class FileStateStore {
 }
 
 class PostgresStateStore {
-  constructor({ databaseUrl, stateFile }) {
+  constructor({ databaseUrl, stateFile, dataRetentionDays = 30 }) {
     this.type = "postgres";
     this.stateFile = stateFile;
     this.databaseUrl = databaseUrl;
+    this.dataRetentionDays = Number(dataRetentionDays) || 30;
     this.client = null;
     this.ready = false;
     this.syncedLessonIds = new Set();
     this.syncedLessonStats = new Map();
+    this.syncedSignalDecisionIds = new Set();
+    this.syncedMarketSnapshotIds = new Set();
+    this.lastCleanupAt = 0;
   }
 
   async init() {
@@ -171,6 +189,54 @@ class PostgresStateStore {
       ON market_candles (exchange, market_type, symbol, timeframe, timestamp DESC)
     `);
     await this.client.query(`
+      CREATE TABLE IF NOT EXISTS bot_signal_decisions (
+        id text PRIMARY KEY,
+        exchange text,
+        market_type text,
+        symbol text,
+        timeframe text,
+        accepted boolean,
+        reason text,
+        direction text,
+        entry_mode text,
+        score double precision,
+        rr double precision,
+        candle_time bigint,
+        decided_at bigint,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS bot_signal_decisions_lookup_idx
+      ON bot_signal_decisions (exchange, market_type, symbol, timeframe, decided_at DESC)
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS bot_signal_decisions_acceptance_idx
+      ON bot_signal_decisions (accepted, decided_at DESC)
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS market_snapshots (
+        id text PRIMARY KEY,
+        exchange text,
+        market_type text,
+        symbol text,
+        timeframe text,
+        candle_time bigint,
+        open double precision,
+        high double precision,
+        low double precision,
+        close double precision,
+        volume double precision,
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS market_snapshots_lookup_idx
+      ON market_snapshots (exchange, market_type, symbol, timeframe, candle_time DESC)
+    `);
+    await this.client.query(`
       CREATE TABLE IF NOT EXISTS order_book_liquidity_zones (
         id text PRIMARY KEY,
         exchange text NOT NULL,
@@ -215,6 +281,8 @@ class PostgresStateStore {
       [stateRowId, normalizedState]
     );
     await this.saveLessons(normalizedState);
+    await this.saveResearchWarehouse(normalizedState);
+    await this.cleanupOldDataIfDue();
   }
 
   async saveLessons(state) {
@@ -293,6 +361,117 @@ class PostgresStateStore {
       );
       this.syncedLessonStats.set(id, fingerprint);
     }
+  }
+
+  async saveResearchWarehouse(state) {
+    await this.saveSignalDecisions(state.research?.signalDecisions || []);
+    await this.saveMarketSnapshots(state.research?.marketSnapshots || []);
+  }
+
+  async saveSignalDecisions(decisions) {
+    for (let index = 0; index < decisions.length; index += 1) {
+      const decision = decisions[index];
+      const id = getResearchRecordId("signal_decision", decision, index);
+      if (this.syncedSignalDecisionIds.has(id)) continue;
+
+      await this.client.query(
+        `INSERT INTO bot_signal_decisions (
+          id, exchange, market_type, symbol, timeframe, accepted, reason, direction, entry_mode,
+          score, rr, candle_time, decided_at, data, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          exchange = EXCLUDED.exchange,
+          market_type = EXCLUDED.market_type,
+          symbol = EXCLUDED.symbol,
+          timeframe = EXCLUDED.timeframe,
+          accepted = EXCLUDED.accepted,
+          reason = EXCLUDED.reason,
+          direction = EXCLUDED.direction,
+          entry_mode = EXCLUDED.entry_mode,
+          score = EXCLUDED.score,
+          rr = EXCLUDED.rr,
+          candle_time = EXCLUDED.candle_time,
+          decided_at = EXCLUDED.decided_at,
+          data = EXCLUDED.data,
+          updated_at = now()`,
+        [
+          id,
+          decision.exchange || null,
+          decision.marketType || decision.market?.type || null,
+          decision.symbol || null,
+          decision.timeframe || null,
+          decision.accepted === undefined ? null : Boolean(decision.accepted),
+          decision.reason || decision.paperRejectReason || null,
+          decision.direction || null,
+          decision.entryMode || decision.debug?.entryMode || null,
+          finiteNumberOrNull(decision.score),
+          finiteNumberOrNull(decision.rr),
+          finiteNumberOrNull(decision.candleTime ?? decision.debug?.lastCandleTime),
+          finiteNumberOrNull(decision.at),
+          { ...decision, id }
+        ]
+      );
+      this.syncedSignalDecisionIds.add(id);
+    }
+  }
+
+  async saveMarketSnapshots(snapshots) {
+    for (let index = 0; index < snapshots.length; index += 1) {
+      const snapshot = snapshots[index];
+      const id = getResearchRecordId("market_snapshot", snapshot, index);
+      if (this.syncedMarketSnapshotIds.has(id)) continue;
+
+      await this.client.query(
+        `INSERT INTO market_snapshots (
+          id, exchange, market_type, symbol, timeframe, candle_time, open, high, low, close, volume, data, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          exchange = EXCLUDED.exchange,
+          market_type = EXCLUDED.market_type,
+          symbol = EXCLUDED.symbol,
+          timeframe = EXCLUDED.timeframe,
+          candle_time = EXCLUDED.candle_time,
+          open = EXCLUDED.open,
+          high = EXCLUDED.high,
+          low = EXCLUDED.low,
+          close = EXCLUDED.close,
+          volume = EXCLUDED.volume,
+          data = EXCLUDED.data,
+          updated_at = now()`,
+        [
+          id,
+          snapshot.exchange || null,
+          snapshot.marketType || snapshot.market?.type || null,
+          snapshot.symbol || null,
+          snapshot.timeframe || null,
+          finiteNumberOrNull(snapshot.candleTime ?? snapshot.timestamp),
+          finiteNumberOrNull(snapshot.open),
+          finiteNumberOrNull(snapshot.high),
+          finiteNumberOrNull(snapshot.low),
+          finiteNumberOrNull(snapshot.close),
+          finiteNumberOrNull(snapshot.volume),
+          { ...snapshot, id }
+        ]
+      );
+      this.syncedMarketSnapshotIds.add(id);
+    }
+  }
+
+  async cleanupOldDataIfDue() {
+    const retentionDays = Math.max(1, Number(this.dataRetentionDays) || 30);
+    const now = Date.now();
+    if (now - this.lastCleanupAt < 6 * 60 * 60 * 1000) return;
+    this.lastCleanupAt = now;
+
+    const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+    await this.client.query("DELETE FROM bot_signal_decisions WHERE decided_at IS NOT NULL AND decided_at < $1", [cutoff]);
+    await this.client.query("DELETE FROM market_snapshots WHERE candle_time IS NOT NULL AND candle_time < $1", [cutoff]);
+    await this.client.query("DELETE FROM market_candles WHERE timestamp < $1", [cutoff]);
+    await this.client.query("DELETE FROM order_book_liquidity_zones WHERE timestamp < $1", [cutoff]);
   }
 
   async saveCandles({ exchangeId, marketType, symbol, timeframe, candles }) {
@@ -464,7 +643,8 @@ export function createStateStore(runtimeConfig) {
   if (runtimeConfig.databaseUrl) {
     return new PostgresStateStore({
       databaseUrl: runtimeConfig.databaseUrl,
-      stateFile: runtimeConfig.stateFile
+      stateFile: runtimeConfig.stateFile,
+      dataRetentionDays: runtimeConfig.dataRetentionDays
     });
   }
 

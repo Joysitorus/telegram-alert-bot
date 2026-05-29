@@ -48,12 +48,14 @@ export async function sendTelegramDocument({ botToken, chatId, filename, buffer,
 export function buildSignalMessage(signal, priceDecimals = 12) {
   const directionEmoji = signal.direction === "BUY" ? "🟢" : "🔴";
   const pair = `${signal.exchange}:${signal.symbol}`;
+  const marketSide = signal.market?.inverse ? "inverse" : signal.market?.linear ? "linear" : signal.market?.contract ? "contract" : "spot";
 
   return `
 ${directionEmoji} <b>${escapeHtml(signal.direction)} SIGNAL</b>
 
 <b>Pair:</b> ${escapeHtml(pair)}
 <b>Timeframe:</b> ${escapeHtml(signal.timeframe)}
+<b>Market:</b> ${escapeHtml(signal.market?.type || "-")} ${escapeHtml(marketSide)} settle=${escapeHtml(signal.market?.settle || "-")} contractSize=${escapeHtml(formatNumber(signal.market?.contractSize, 8))}
 <b>Candle:</b> ${escapeHtml(formatDateTime(signal.candleTime))}
 <b>Trend:</b> ${escapeHtml(signal.trend)}
 

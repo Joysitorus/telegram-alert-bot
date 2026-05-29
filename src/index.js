@@ -2,6 +2,7 @@ import ccxt from "ccxt";
 import { gzipSync } from "zlib";
 import { runCommandLoop, syncTelegramCommands } from "./commands.js";
 import { config, getConfigHash, getStrategyConfigForSymbol, validateConfig } from "./config.js";
+import { buildMarketAccuracyReport, getMarketMetadata, getOrderBookLevelNotional } from "./exchange.js";
 import { startHealthServer } from "./health.js";
 import { createLogger, ErrorThrottler, withRetry } from "./reliability.js";
 import { analyzeSymbol } from "./strategy.js";
@@ -40,6 +41,7 @@ let isShuttingDown = false;
 let stateStore = null;
 let healthServer = null;
 let currentState = null;
+let exchangeMarketMetadata = new Map();
 const logger = createLogger(config.runtime.logLevel);
 
 const oneDayMs = 24 * 60 * 60 * 1000;
@@ -244,21 +246,21 @@ async function loadAnalysisCandles({ exchange, stateStore, symbol, timeframe = c
   }
 }
 
-function getAverageNotional(levels) {
+function getAverageNotional(levels, marketMetadata = null) {
   const notionals = levels
-    .map(([price, amount]) => Number(price) * Number(amount))
+    .map((level) => getOrderBookLevelNotional(level, marketMetadata))
     .filter((value) => Number.isFinite(value) && value > 0);
   if (notionals.length === 0) return 0;
   return notionals.reduce((sum, value) => sum + value, 0) / notionals.length;
 }
 
-function getLiquidityWalls({ levels, side, midPrice, averageNotional, cfg }) {
+function getLiquidityWalls({ levels, side, midPrice, averageNotional, cfg, marketMetadata = null }) {
   const minNotional = Math.max(Number(cfg.minWallNotional) || 0, averageNotional * cfg.wallMultiplier);
   return levels
     .map(([price, amount]) => {
       const safePrice = Number(price);
       const safeAmount = Number(amount);
-      const notional = safePrice * safeAmount;
+      const notional = getOrderBookLevelNotional([safePrice, safeAmount], marketMetadata);
       const distancePercent = midPrice > 0 ? Math.abs(safePrice - midPrice) / midPrice * 100 : 0;
       return {
         side,
@@ -279,7 +281,7 @@ function getLiquidityWalls({ levels, side, midPrice, averageNotional, cfg }) {
     .slice(0, 10);
 }
 
-function summarizeOrderBook(orderBook, symbol) {
+function summarizeOrderBook(orderBook, symbol, marketMetadata = null) {
   const cfg = config.orderBookLiquidity;
   const bids = Array.isArray(orderBook?.bids) ? orderBook.bids.slice(0, cfg.depthLimit) : [];
   const asks = Array.isArray(orderBook?.asks) ? orderBook.asks.slice(0, cfg.depthLimit) : [];
@@ -287,10 +289,10 @@ function summarizeOrderBook(orderBook, symbol) {
   const bestAsk = Number(asks[0]?.[0]);
   const midPrice = Number.isFinite(bestBid) && Number.isFinite(bestAsk) ? (bestBid + bestAsk) / 2 : 0;
   const spreadPercent = midPrice > 0 ? (bestAsk - bestBid) / midPrice * 100 : 0;
-  const bidAverage = getAverageNotional(bids);
-  const askAverage = getAverageNotional(asks);
-  const bidWalls = getLiquidityWalls({ levels: bids, side: "bid", midPrice, averageNotional: bidAverage, cfg });
-  const askWalls = getLiquidityWalls({ levels: asks, side: "ask", midPrice, averageNotional: askAverage, cfg });
+  const bidAverage = getAverageNotional(bids, marketMetadata);
+  const askAverage = getAverageNotional(asks, marketMetadata);
+  const bidWalls = getLiquidityWalls({ levels: bids, side: "bid", midPrice, averageNotional: bidAverage, cfg, marketMetadata });
+  const askWalls = getLiquidityWalls({ levels: asks, side: "ask", midPrice, averageNotional: askAverage, cfg, marketMetadata });
 
   return {
     timestamp: orderBook?.timestamp || Date.now(),
@@ -302,6 +304,14 @@ function summarizeOrderBook(orderBook, symbol) {
     depthLimit: cfg.depthLimit,
     wallMultiplier: cfg.wallMultiplier,
     maxDistancePercent: cfg.maxDistancePercent,
+    market: marketMetadata ? {
+      type: marketMetadata.type,
+      contract: marketMetadata.contract,
+      linear: marketMetadata.linear,
+      inverse: marketMetadata.inverse,
+      contractSize: marketMetadata.contractSize,
+      settle: marketMetadata.settle
+    } : null,
     bidAverageNotional: bidAverage,
     askAverageNotional: askAverage,
     bidWalls,
@@ -319,6 +329,7 @@ async function fetchOrderBookLiquidity({ exchange, state, stateStore, symbol }) 
   if (!config.orderBookLiquidity.enabled || typeof exchange.fetchOrderBook !== "function") return null;
 
   try {
+    const marketMetadata = exchangeMarketMetadata.get(symbol) || getMarketMetadata(exchange, symbol);
     const orderBook = await withRetry(
       () => exchange.fetchOrderBook(symbol, config.orderBookLiquidity.depthLimit),
       {
@@ -327,7 +338,7 @@ async function fetchOrderBookLiquidity({ exchange, state, stateStore, symbol }) 
         label: `fetchOrderBook ${symbol}`
       }
     );
-    const snapshot = summarizeOrderBook(orderBook, symbol);
+    const snapshot = summarizeOrderBook(orderBook, symbol, marketMetadata);
 
     recordOrderBookSnapshot(state, {
       exchange: config.exchange.id,
@@ -637,6 +648,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const strategyConfig = getStrategyConfigForSymbol(symbol);
   const runtime = getRuntimeState(state);
   const paperEnabled = runtime.paperEnabledOverride ?? config.paper.enabled;
+  const marketMetadata = exchangeMarketMetadata.get(symbol) || getMarketMetadata(exchange, symbol);
 
   const candles = await loadAnalysisCandles({ exchange, stateStore, symbol });
   const orderBookLiquidity = await fetchOrderBookLiquidity({ exchange, state, stateStore, symbol });
@@ -644,6 +656,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   if (lastCandle) {
     recordMarketSnapshot(state, {
       exchange: config.exchange.id,
+      marketType: config.exchange.marketType,
       symbol,
       timeframe: config.exchange.timeframe,
       candleTime: lastCandle.timestamp,
@@ -651,7 +664,15 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
       high: lastCandle.high,
       low: lastCandle.low,
       close: lastCandle.close,
-      volume: lastCandle.volume
+      volume: lastCandle.volume,
+      market: marketMetadata ? {
+        type: marketMetadata.type,
+        contract: marketMetadata.contract,
+        linear: marketMetadata.linear,
+        inverse: marketMetadata.inverse,
+        contractSize: marketMetadata.contractSize,
+        settle: marketMetadata.settle
+      } : null
     });
   }
   const lifecycleOptions = { maxOpenCandles: config.performance.tradeExpiryCandles };
@@ -708,6 +729,18 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
       spreadPercent: orderBookLiquidity.spreadPercent,
       nearestBidWall: orderBookLiquidity.nearestBidWall,
       nearestAskWall: orderBookLiquidity.nearestAskWall
+    } : null;
+    analysis.signal.market = marketMetadata ? {
+      type: marketMetadata.type,
+      contract: marketMetadata.contract,
+      linear: marketMetadata.linear,
+      inverse: marketMetadata.inverse,
+      contractSize: marketMetadata.contractSize,
+      settle: marketMetadata.settle,
+      pricePrecision: marketMetadata.pricePrecision,
+      amountPrecision: marketMetadata.amountPrecision,
+      minAmount: marketMetadata.minAmount,
+      minCost: marketMetadata.minCost
     } : null;
 
     const marketDataFilter = await signalPassesMarketDataFilters(exchange, symbol, strategyConfig, analysis.signal);
@@ -768,6 +801,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
     }
     recordSignalDecision(state, {
       exchange: config.exchange.id,
+      marketType: config.exchange.marketType,
       symbol,
       timeframe: config.exchange.timeframe,
       accepted: true,
@@ -799,6 +833,7 @@ async function scanSymbol({ exchange, state, stateStore, symbol }) {
   const debug = analysis.debug;
   recordSignalDecision(state, {
     exchange: config.exchange.id,
+    marketType: config.exchange.marketType,
     symbol,
     timeframe: config.exchange.timeframe,
     accepted: false,
@@ -988,10 +1023,17 @@ async function main() {
   );
 
   for (const symbol of config.exchange.symbols) {
-    if (!exchange.markets[symbol]) {
-      logger.warn("symbol not found in loaded markets", { symbol, exchange: config.exchange.id });
-    }
+    if (!exchange.markets[symbol]) logger.warn("symbol not found in loaded markets", { symbol, exchange: config.exchange.id });
   }
+
+  const marketReport = buildMarketAccuracyReport({
+    exchange,
+    symbols: config.exchange.symbols,
+    marketType: config.exchange.marketType
+  });
+  exchangeMarketMetadata = marketReport.markets;
+  for (const warning of marketReport.warnings) logger.warn("market accuracy warning", { warning });
+  if (marketReport.errors.length > 0) throw new Error(marketReport.errors.join("\n"));
 
   stateStore = createStateStore(config.runtime);
   if (config.runtime.singleInstanceLockEnabled) {

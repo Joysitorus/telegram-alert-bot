@@ -479,6 +479,10 @@ async function handleCommand({ command, message, state, stateStore, config, appS
         break;
       }
       const value = args[0] || "default";
+      if (!["on", "off", "default"].includes(value)) {
+        await notify("Format: /setpaper on|off|default", message.chat.id);
+        break;
+      }
       const runtime = getRuntimeState(state);
       runtime.paperEnabledOverride = value === "on" ? true : value === "off" ? false : null;
       await stateStore.save(state);
