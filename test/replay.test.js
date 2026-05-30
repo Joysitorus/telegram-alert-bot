@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDefaultState, getPerformanceState } from "../src/state.js";
-import { runReplaySweep, summarizeReplay } from "../src/replay.js";
+import { buildStrategyReplayWarehouseRecords, runReplaySweep, summarizeReplay } from "../src/replay.js";
 
 function paperTrade(overrides = {}) {
   return {
@@ -154,4 +154,50 @@ test("runReplaySweep builds bounded ranking output from custom search space", ()
       else process.env[key] = value;
     }
   }
+});
+
+test("buildStrategyReplayWarehouseRecords creates comparable run and result rows", () => {
+  const output = {
+    generatedAt: "2026-05-30T00:00:00.000Z",
+    method: "bounded_grid_sweep_with_walk_forward_ranking",
+    trainRatio: 0.7,
+    totalCombinations: 2,
+    evaluatedCombinations: 2,
+    evaluated: [
+      {
+        id: "sweep_0001",
+        parameters: { minConfirm: 5 },
+        score: 1.25,
+        flags: [],
+        train: { closedTrades: 3, averageR: 0.5, totalR: 1.5, maxDrawdownR: 0.5 },
+        test: { closedTrades: 2, averageR: 0.4, totalR: 0.8, maxDrawdownR: 0.3 },
+        comparison: { averageRDelta: -0.1 }
+      },
+      {
+        id: "sweep_0002",
+        parameters: { minConfirm: 6 },
+        score: -1,
+        flags: ["low_test_trade_count"],
+        train: { closedTrades: 2, averageR: 0.2, totalR: 0.4, maxDrawdownR: 0.2 },
+        test: { closedTrades: 0, averageR: 0, totalR: 0, maxDrawdownR: 0 },
+        comparison: { averageRDelta: -0.2 }
+      }
+    ]
+  };
+
+  const records = buildStrategyReplayWarehouseRecords(output, {
+    runId: "run_1",
+    runType: "sweep",
+    source: "database"
+  });
+
+  assert.equal(records.run.id, "run_1");
+  assert.equal(records.run.runType, "sweep");
+  assert.equal(records.run.source, "database");
+  assert.equal(records.run.totalConfigs, 2);
+  assert.equal(records.results.length, 2);
+  assert.equal(records.results[0].id, "run_1:sweep_0001");
+  assert.equal(records.results[0].rank, 1);
+  assert.equal(records.results[0].score, 1.25);
+  assert.deepEqual(records.results[1].flags, ["low_test_trade_count"]);
 });

@@ -316,6 +316,17 @@ function getReplayWalkForwardRatio() {
   return clampWalkForwardRatio(process.env.REPLAY_WALK_FORWARD_RATIO ?? process.env.REPLAY_TRAIN_RATIO ?? 0.7);
 }
 
+function getReplaySourceLabel() {
+  if (process.env.REPLAY_SOURCE === "database" || process.env.REPLAY_USE_DB === "true") return "database";
+  return "exchange";
+}
+
+function shouldSaveReplayWarehouse() {
+  if (!config.runtime.databaseUrl) return false;
+  if (process.env.REPLAY_SAVE_TO_WAREHOUSE === undefined) return true;
+  return toBoolean(process.env.REPLAY_SAVE_TO_WAREHOUSE, true);
+}
+
 function normalizeSweepKey(key) {
   return sweepKeyAliases[key] || sweepKeyAliases[String(key).toUpperCase()] || key;
 }
@@ -626,6 +637,99 @@ export function runReplaySweep(candlesBySymbol, options = {}) {
   };
 }
 
+function getReplayRunId({ runType, output }) {
+  const hash = getConfigHash({
+    runType,
+    exchange: config.exchange,
+    strategy: config.strategy,
+    paper: config.paper,
+    output: {
+      generatedAt: output.generatedAt,
+      totalCombinations: output.totalCombinations,
+      evaluatedCombinations: output.evaluatedCombinations,
+      global: output.global || output.ranking?.[0] || null
+    }
+  }).slice(0, 10);
+  return `strategy_replay:${runType}:${Date.now()}:${hash}`;
+}
+
+function compactSingleReplayResult(output) {
+  const global = output.walkForward?.global || {};
+  return {
+    id: "baseline",
+    configId: "baseline",
+    parameters: {},
+    rank: 1,
+    score: null,
+    train: global.train || null,
+    test: global.test || null,
+    comparison: global.comparison || null,
+    flags: [],
+    summary: {
+      global: output.global,
+      bySymbol: output.bySymbol,
+      walkForward: output.walkForward
+    }
+  };
+}
+
+export function buildStrategyReplayWarehouseRecords(output, options = {}) {
+  const runType = options.runType || (output.method === "bounded_grid_sweep_with_walk_forward_ranking" ? "sweep" : "single");
+  const runId = options.runId || output.runId || getReplayRunId({ runType, output });
+  const evaluated = runType === "sweep" ? output.evaluated || [] : [compactSingleReplayResult(output)];
+  const run = {
+    id: runId,
+    runType,
+    source: options.source || getReplaySourceLabel(),
+    exchange: config.exchange.id,
+    marketType: config.exchange.marketType,
+    timeframe: config.exchange.timeframe,
+    symbols: config.exchange.symbols,
+    strategyVersion: config.strategy.version,
+    configHash: getConfigHash({ exchange: config.exchange, strategy: config.strategy, paper: config.paper }),
+    trainRatio: output.trainRatio ?? output.walkForward?.trainRatio ?? null,
+    totalConfigs: output.totalCombinations ?? 1,
+    evaluatedConfigs: output.evaluatedCombinations ?? evaluated.length,
+    output
+  };
+
+  const results = evaluated.map((result, index) => ({
+    id: `${runId}:${result.id || result.configId || index + 1}`,
+    runId,
+    configId: result.id || result.configId || "baseline",
+    rank: index + 1,
+    score: result.score ?? null,
+    parameters: result.parameters || {},
+    flags: result.flags || [],
+    train: result.train || null,
+    test: result.test || null,
+    comparison: result.comparison || null,
+    data: result
+  }));
+
+  return { run, results };
+}
+
+async function saveReplayWarehouse(stateStore, output, options = {}) {
+  if (!stateStore?.saveStrategyReplayRun || !stateStore?.saveStrategyReplayResults) {
+    return { saved: false, supported: false, runId: null, results: 0 };
+  }
+
+  const records = buildStrategyReplayWarehouseRecords(output, options);
+  output.runId = records.run.id;
+  records.run.output = output;
+
+  const runSave = await stateStore.saveStrategyReplayRun(records.run);
+  const resultSave = await stateStore.saveStrategyReplayResults(records.results);
+
+  return {
+    saved: Boolean(runSave.supported && resultSave.supported),
+    supported: Boolean(runSave.supported && resultSave.supported),
+    runId: records.run.id,
+    results: resultSave.saved || 0
+  };
+}
+
 async function main() {
   const ExchangeClass = ccxt[config.exchange.id];
   if (!ExchangeClass) throw new Error(`Exchange tidak ditemukan: ${config.exchange.id}`);
@@ -636,8 +740,9 @@ async function main() {
   });
   await exchange.loadMarkets();
 
-  const useDatabase = process.env.REPLAY_SOURCE === "database" || process.env.REPLAY_USE_DB === "true";
-  const stateStore = useDatabase ? createStateStore(config.runtime) : null;
+  const useDatabase = getReplaySourceLabel() === "database";
+  const saveWarehouse = shouldSaveReplayWarehouse();
+  const stateStore = useDatabase || saveWarehouse ? createStateStore(config.runtime) : null;
   const candlesBySymbol = {};
 
   for (const symbol of config.exchange.symbols) {
@@ -661,6 +766,13 @@ async function main() {
         trainRatio
       }
     });
+
+  if (saveWarehouse) {
+    output.warehouse = await saveReplayWarehouse(stateStore, output, {
+      runType: toBoolean(process.env.REPLAY_SWEEP_ENABLED, false) ? "sweep" : "single",
+      source: getReplaySourceLabel()
+    });
+  }
 
   console.log(JSON.stringify(output, null, 2));
   if (stateStore) await stateStore.close();

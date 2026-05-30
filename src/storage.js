@@ -74,6 +74,14 @@ class FileStateStore {
     return { saved: 0, supported: false };
   }
 
+  async saveStrategyReplayRun() {
+    return { saved: 0, supported: false };
+  }
+
+  async saveStrategyReplayResults() {
+    return { saved: 0, supported: false };
+  }
+
   async close() {
     await this.releaseLock();
   }
@@ -252,6 +260,62 @@ class PostgresStateStore {
     await this.client.query(`
       CREATE INDEX IF NOT EXISTS order_book_liquidity_zones_lookup_idx
       ON order_book_liquidity_zones (exchange, market_type, symbol, timestamp DESC)
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS strategy_replay_runs (
+        id text PRIMARY KEY,
+        run_type text NOT NULL,
+        source text,
+        exchange text,
+        market_type text,
+        timeframe text,
+        symbols jsonb NOT NULL DEFAULT '[]'::jsonb,
+        strategy_version text,
+        config_hash text,
+        train_ratio double precision,
+        total_configs integer,
+        evaluated_configs integer,
+        data jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS strategy_replay_runs_lookup_idx
+      ON strategy_replay_runs (exchange, market_type, timeframe, created_at DESC)
+    `);
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS strategy_replay_results (
+        id text PRIMARY KEY,
+        run_id text NOT NULL REFERENCES strategy_replay_runs(id) ON DELETE CASCADE,
+        config_id text,
+        rank integer,
+        score double precision,
+        parameters jsonb NOT NULL DEFAULT '{}'::jsonb,
+        flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+        train_closed_trades integer,
+        train_average_r double precision,
+        train_total_r double precision,
+        train_max_drawdown_r double precision,
+        test_closed_trades integer,
+        test_average_r double precision,
+        test_total_r double precision,
+        test_max_drawdown_r double precision,
+        data jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS strategy_replay_results_run_idx
+      ON strategy_replay_results (run_id, rank)
+    `);
+    await this.client.query(`
+      CREATE INDEX IF NOT EXISTS strategy_replay_results_score_idx
+      ON strategy_replay_results (score DESC, test_average_r DESC)
+    `);
+    await this.client.query(`
+      ALTER TABLE strategy_replay_results
+      ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()
     `);
 
     this.ready = true;
@@ -617,6 +681,113 @@ class PostgresStateStore {
     );
 
     return { saved: 1, supported: true };
+  }
+
+  async saveStrategyReplayRun(run) {
+    await this.init();
+    await this.client.query(
+      `INSERT INTO strategy_replay_runs (
+        id, run_type, source, exchange, market_type, timeframe, symbols, strategy_version,
+        config_hash, train_ratio, total_configs, evaluated_configs, data, created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+      ON CONFLICT (id)
+      DO UPDATE SET
+        run_type = EXCLUDED.run_type,
+        source = EXCLUDED.source,
+        exchange = EXCLUDED.exchange,
+        market_type = EXCLUDED.market_type,
+        timeframe = EXCLUDED.timeframe,
+        symbols = EXCLUDED.symbols,
+        strategy_version = EXCLUDED.strategy_version,
+        config_hash = EXCLUDED.config_hash,
+        train_ratio = EXCLUDED.train_ratio,
+        total_configs = EXCLUDED.total_configs,
+        evaluated_configs = EXCLUDED.evaluated_configs,
+        data = EXCLUDED.data`,
+      [
+        run.id,
+        run.runType,
+        run.source || null,
+        run.exchange || null,
+        run.marketType || null,
+        run.timeframe || null,
+        run.symbols || [],
+        run.strategyVersion || null,
+        run.configHash || null,
+        finiteNumberOrNull(run.trainRatio),
+        finiteNumberOrNull(run.totalConfigs),
+        finiteNumberOrNull(run.evaluatedConfigs),
+        run
+      ]
+    );
+
+    return { saved: 1, supported: true };
+  }
+
+  async saveStrategyReplayResults(results) {
+    await this.init();
+    const rows = Array.isArray(results) ? results : [];
+    if (rows.length === 0) return { saved: 0, supported: true };
+
+    for (const chunk of chunkArray(rows, 100)) {
+      const values = [];
+      const placeholders = chunk.map((result, index) => {
+        const offset = index * 18;
+        values.push(
+          result.id,
+          result.runId,
+          result.configId || null,
+          finiteNumberOrNull(result.rank),
+          finiteNumberOrNull(result.score),
+          result.parameters || {},
+          result.flags || [],
+          finiteNumberOrNull(result.train?.closedTrades),
+          finiteNumberOrNull(result.train?.averageR),
+          finiteNumberOrNull(result.train?.totalR),
+          finiteNumberOrNull(result.train?.maxDrawdownR),
+          finiteNumberOrNull(result.test?.closedTrades),
+          finiteNumberOrNull(result.test?.averageR),
+          finiteNumberOrNull(result.test?.totalR),
+          finiteNumberOrNull(result.test?.maxDrawdownR),
+          result,
+          new Date(),
+          new Date()
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, $${offset + 16}, $${offset + 17}, $${offset + 18})`;
+      });
+
+      await this.client.query(
+        `INSERT INTO strategy_replay_results (
+          id, run_id, config_id, rank, score, parameters, flags,
+          train_closed_trades, train_average_r, train_total_r, train_max_drawdown_r,
+          test_closed_trades, test_average_r, test_total_r, test_max_drawdown_r,
+          data, created_at, updated_at
+        )
+        VALUES ${placeholders.join(",")}
+        ON CONFLICT (id)
+        DO UPDATE SET
+          run_id = EXCLUDED.run_id,
+          config_id = EXCLUDED.config_id,
+          rank = EXCLUDED.rank,
+          score = EXCLUDED.score,
+          parameters = EXCLUDED.parameters,
+          flags = EXCLUDED.flags,
+          train_closed_trades = EXCLUDED.train_closed_trades,
+          train_average_r = EXCLUDED.train_average_r,
+          train_total_r = EXCLUDED.train_total_r,
+          train_max_drawdown_r = EXCLUDED.train_max_drawdown_r,
+          test_closed_trades = EXCLUDED.test_closed_trades,
+          test_average_r = EXCLUDED.test_average_r,
+          test_total_r = EXCLUDED.test_total_r,
+          test_max_drawdown_r = EXCLUDED.test_max_drawdown_r,
+          data = EXCLUDED.data,
+          updated_at = now()`,
+        values
+      );
+    }
+
+    return { saved: rows.length, supported: true };
   }
 
   async close() {

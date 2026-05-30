@@ -19,7 +19,7 @@ Bot ini **tidak mengeksekusi order real**. Real execution sengaja belum dibuat s
 - Telegram command center dengan role admin/operator/viewer dan inline keyboard.
 - State storage lokal atau PostgreSQL.
 - Market candle warehouse di PostgreSQL untuk menyimpan candle tertutup, memperkuat lesson, replay, dan dashboard.
-- Research data warehouse di PostgreSQL untuk signal decision, market snapshot, candle, order book liquidity, lesson, dan lesson stats.
+- Research data warehouse di PostgreSQL untuk signal decision, market snapshot, candle, order book liquidity, lesson, lesson stats, dan hasil replay/sweep strategi.
 - Order book liquidity zones gratis dari public order book exchange untuk membaca bid/ask wall terdekat.
 - Lesson learning untuk mencatat outcome sinyal dan menolak setup yang performanya buruk setelah sampel cukup.
 - Backup manual dan backup harian otomatis ke Telegram dalam format `.json.gz`.
@@ -52,7 +52,7 @@ Bot hanya memakai candle tertutup untuk mengurangi repaint. Jika TP dan SL terse
 
 Jika `DATABASE_URL` aktif, bot juga bisa menyimpan candle yang sudah diambil ke PostgreSQL agar data sinyal, lesson, replay, dan dashboard makin kuat. Candle tetap diambil dari exchange sebagai sumber awal, lalu di-upsert ke tabel `market_candles`.
 
-Selain blob state utama di `bot_state`, PostgreSQL juga menyimpan data riset ke tabel query-friendly: `bot_signal_decisions`, `market_snapshots`, `market_candles`, `order_book_liquidity_zones`, `bot_lessons`, dan `bot_lesson_stats`. Ini membuat analisis sinyal/rejected setup, snapshot market, dan lesson bisa di-query langsung tanpa membaca JSON state penuh.
+Selain blob state utama di `bot_state`, PostgreSQL juga menyimpan data riset ke tabel query-friendly: `bot_signal_decisions`, `market_snapshots`, `market_candles`, `order_book_liquidity_zones`, `bot_lessons`, `bot_lesson_stats`, `strategy_replay_runs`, dan `strategy_replay_results`. Ini membuat analisis sinyal/rejected setup, snapshot market, lesson, dan hasil replay/sweep bisa di-query langsung tanpa membaca JSON state penuh.
 
 Bot juga bisa membaca order book publik gratis dari exchange untuk menghitung liquidity wall. Ini bukan liquidation heatmap asli, tetapi memberi konteks bid/ask wall terdekat yang bisa dipakai sebagai informasi sinyal atau filter opsional.
 
@@ -507,6 +507,8 @@ bot_lessons        # lesson per closed signal/trade
 bot_lesson_stats   # agregasi statistik lesson
 market_candles     # candle tertutup untuk analisis/replay/dashboard
 order_book_liquidity_zones # snapshot bid/ask wall dari order book publik
+strategy_replay_runs # header eksperimen replay/sweep
+strategy_replay_results # hasil per konfigurasi replay/sweep
 ```
 
 ### Market Candle Warehouse
@@ -581,7 +583,7 @@ DATA_RETENTION_DAYS=30
 ```
 
 File storage memakai lock file lokal. PostgreSQL memakai advisory lock.
-`DATA_RETENTION_DAYS` juga membersihkan data warehouse berukuran besar (`bot_signal_decisions`, `market_snapshots`, `market_candles`, dan `order_book_liquidity_zones`) secara berkala. Lesson dan aggregated lesson stats tidak ikut dibersihkan agar pembelajaran strategi tetap panjang.
+`DATA_RETENTION_DAYS` juga membersihkan data warehouse berukuran besar (`bot_signal_decisions`, `market_snapshots`, `market_candles`, dan `order_book_liquidity_zones`) secara berkala. Lesson, aggregated lesson stats, dan replay warehouse tidak ikut dibersihkan agar pembelajaran strategi serta hasil eksperimen tetap bisa dibandingkan lintas run.
 
 ## Health, Dashboard, dan Metrics
 
@@ -643,6 +645,7 @@ REPLAY_SWEEP_MAX_CONFIGS=120
 REPLAY_SWEEP_TOP=10
 REPLAY_SWEEP_MIN_TEST_TRADES=3
 REPLAY_SWEEP_SPACE_JSON=
+REPLAY_SAVE_TO_WAREHOUSE=true
 ```
 
 `npm run replay:db` membutuhkan `DATABASE_URL` dan data candle yang sudah terkumpul di `market_candles`. Jika tabel belum berisi candle untuk symbol/timeframe yang dipilih, replay DB akan melewati symbol tersebut.
@@ -672,6 +675,68 @@ REPLAY_SWEEP_MIN_TEST_TRADES=3
 ```
 
 Ranking sweep memakai skor komposit yang lebih menekankan performa test/OOS, lalu memberi penalti pada drawdown R, decay train-to-test, dan jumlah closed trade test yang terlalu kecil. Output juga menandai flag seperti `low_test_trade_count`, `train_positive_test_nonpositive`, `large_train_test_decay`, dan `drawdown_exceeds_test_edge`.
+
+### Replay Warehouse
+
+Jika `DATABASE_URL` tersedia, hasil `npm run replay`, `npm run replay:db`, `npm run replay:sweep`, dan `npm run replay:sweep:db` otomatis disimpan ke PostgreSQL saat `REPLAY_SAVE_TO_WAREHOUSE=true`. Tabel dibuat otomatis:
+
+```text
+strategy_replay_runs
+- id
+- run_type
+- source
+- exchange
+- market_type
+- timeframe
+- symbols
+- strategy_version
+- config_hash
+- train_ratio
+- total_configs
+- evaluated_configs
+- data
+- created_at
+
+strategy_replay_results
+- id
+- run_id
+- config_id
+- rank
+- score
+- parameters
+- flags
+- train_closed_trades
+- train_average_r
+- train_total_r
+- train_max_drawdown_r
+- test_closed_trades
+- test_average_r
+- test_total_r
+- test_max_drawdown_r
+- data
+- created_at
+- updated_at
+```
+
+Contoh query membandingkan hasil sweep:
+
+```sql
+SELECT
+  r.created_at,
+  x.rank,
+  x.score,
+  x.parameters,
+  x.test_closed_trades,
+  x.test_average_r,
+  x.test_total_r,
+  x.test_max_drawdown_r,
+  x.flags
+FROM strategy_replay_results x
+JOIN strategy_replay_runs r ON r.id = x.run_id
+WHERE r.run_type = 'sweep'
+ORDER BY r.created_at DESC, x.rank ASC
+LIMIT 50;
+```
 
 Contoh field penting:
 
